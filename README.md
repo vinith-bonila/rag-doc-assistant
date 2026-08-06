@@ -1,5 +1,10 @@
 # DocMind — RAG Document Assistant
 
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Built with Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B)
+![Tests: pytest](https://img.shields.io/badge/tests-pytest-0A9EDC)
+
 > **🔗 Live demo:** _<!-- paste your Streamlit Cloud URL here, e.g. https://docmind.streamlit.app -->_ **← add the live link after deploying**
 
 Upload your PDFs, DOCX, TXT, or Markdown, ask questions, and get **streaming,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
@@ -48,6 +49,10 @@ class RAGPipeline:
     def __init__(self, index_dir: Optional[str] = None,
                  bootstrap_docs: str = "data/sample_docs"):
         self.index_dir = index_dir or settings.index_dir
+        # One pipeline is shared across Streamlit sessions (st.cache_resource),
+        # i.e. across threads. This guards the index against a concurrent
+        # upload (writer) racing a query (reader).
+        self._lock = threading.RLock()
         # Lazy singletons — see the module docstring. None until first use.
         self._embedder: Optional[Embedder] = None
         self._reranker: Optional[Reranker] = None
@@ -110,25 +115,29 @@ class RAGPipeline:
         Returns a small summary (per-file chunk counts + new total). Rebuilds the
         BM25 side of the hybrid retriever, which must see the full chunk set.
         """
-        added: List[dict] = []
-        for filename, data in files:
-            segments = parse_bytes(filename, data)  # raises ValueError if unsupported
-            chunks = chunk_document(filename, segments, self.embedder,
-                                    start_id=len(self.store.chunks))
-            if not chunks:
-                added.append({"filename": filename, "chunks_added": 0})
-                continue
-            vectors = self.embedder.encode([c.text for c in chunks])
-            self.store.add(vectors, chunks)
-            added.append({"filename": filename, "chunks_added": len(chunks)})
+        # Validate/parse everything up front so a bad file fails before we mutate
+        # the shared index.
+        parsed = [(filename, parse_bytes(filename, data)) for filename, data in files]
+        with self._lock:
+            added: List[dict] = []
+            for filename, segments in parsed:
+                chunks = chunk_document(filename, segments, self.embedder,
+                                        start_id=len(self.store.chunks))
+                if not chunks:
+                    added.append({"filename": filename, "chunks_added": 0})
+                    continue
+                vectors = self.embedder.encode([c.text for c in chunks])
+                self.store.add(vectors, chunks)
+                added.append({"filename": filename, "chunks_added": len(chunks)})
 
-        self._retriever = None           # force BM25 rebuild over the full set on next use
-        self.store.save(self.index_dir)  # persist so the new docs survive restart
-        return {"files": added, "total_chunks": len(self.store.chunks)}
+            self._retriever = None           # force BM25 rebuild over the full set on next use
+            self.store.save(self.index_dir)  # persist so the new docs survive restart
+            return {"files": added, "total_chunks": len(self.store.chunks)}
 
     def retrieve(self, query: str, k: Optional[int] = None
                  ) -> List[Tuple[Chunk, float]]:
-        return self.retriever.retrieve(query, k or settings.retrieve_k)
+        with self._lock:
+            return self.retriever.retrieve(query, k or settings.retrieve_k)
 
     def _rerank(self, query: str, k: Optional[int], top_n: Optional[int]
                 ) -> Tuple[List[Tuple[Chunk, float]], List[Source]]:

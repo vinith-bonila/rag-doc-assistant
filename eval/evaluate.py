@@ -27,12 +27,15 @@ Run:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Dict, List, Optional
 
 import numpy as np
 
 from src.pipeline import RAGPipeline
+
+logger = logging.getLogger("docmind.eval")
 
 EVAL_PATH = os.path.join(os.path.dirname(__file__), "eval_dataset.json")
 RECALL_K = 5
@@ -114,17 +117,24 @@ def run_eval(pipeline: RAGPipeline, k: int = RECALL_K,
             recall_hits += 1
 
         # Answer + reranked sources (used for MRR, faithfulness, relevance).
-        result = pipeline.answer(q["question"])
-        rr_sum += _reciprocal_rank(result.sources, expected)
-
-        contexts = [s.text for s in result.sources]
-        if use_llm:
-            faith_scores.append(faithfulness_llm(pipeline, result.answer, contexts))
-        else:
-            faith_scores.append(faithfulness_embedding(pipeline, result.answer, contexts))
-        rel_scores.append(answer_relevance(pipeline, q["question"], result.answer))
+        # Guard the LLM-dependent work so one transient error (e.g. a rate limit)
+        # degrades to NaN for that question instead of aborting the whole run.
+        try:
+            result = pipeline.answer(q["question"])
+            rr_sum += _reciprocal_rank(result.sources, expected)
+            contexts = [s.text for s in result.sources]
+            if use_llm:
+                faith_scores.append(faithfulness_llm(pipeline, result.answer, contexts))
+            else:
+                faith_scores.append(faithfulness_embedding(pipeline, result.answer, contexts))
+            rel_scores.append(answer_relevance(pipeline, q["question"], result.answer))
+        except Exception:  # noqa: BLE001
+            logger.exception("eval failed for question: %r", q["question"])
+            faith_scores.append(float("nan"))
+            rel_scores.append(float("nan"))
 
     faith_valid = [s for s in faith_scores if not np.isnan(s)]
+    rel_valid = [s for s in rel_scores if not np.isnan(s)]
     metrics = [
         {
             "name": f"recall@{k}",
@@ -147,7 +157,7 @@ def run_eval(pipeline: RAGPipeline, k: int = RECALL_K,
         },
         {
             "name": "answer relevance",
-            "value": round(float(np.mean(rel_scores)), 3) if rel_scores else float("nan"),
+            "value": round(float(np.mean(rel_valid)), 3) if rel_valid else float("nan"),
             "explanation": ("Semantic similarity between question and answer — catches "
                             "evasive or off-topic answers."),
         },

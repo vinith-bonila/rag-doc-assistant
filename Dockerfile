@@ -7,6 +7,12 @@ ENV PORT=8501 \
 
 WORKDIR /app
 
+# faiss-cpu needs the OpenMP runtime (libgomp1), which python:*-slim omits —
+# without it `import faiss` fails with "libgomp.so.1: cannot open shared object".
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install deps first so Docker caches this layer when only code changes.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

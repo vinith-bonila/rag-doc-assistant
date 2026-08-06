@@ -35,6 +35,10 @@ Two steps: push to **GitHub**, then point **Streamlit Community Cloud** at the r
    - **Repository**: `<your-username>/rag-doc-assistant`
    - **Branch**: `main`
    - **Main file path**: `ui/streamlit_app.py`
+   - **Python version** (Advanced settings): choose **3.11** or **3.12** — the
+     most reliable prebuilt wheels for `torch` / `faiss-cpu` / `sentence-transformers`.
+     (`requirements.txt` already forces the CPU-only PyTorch build, so the install
+     stays small enough for the free tier.)
 4. Open **Advanced settings → Secrets** and paste (TOML format):
 
    ```toml
