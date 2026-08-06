@@ -1,19 +1,6 @@
----
-title: DocMind RAG Assistant
-emoji: 📄
-colorFrom: indigo
-colorTo: blue
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # DocMind — RAG Document Assistant
 
-> **Live demo:** _<!-- add your Hugging Face Space URL here after deploying, e.g. https://huggingface.co/spaces/your-name/docmind -->_ **← paste the live link here**
-
-<!-- The YAML block above configures the Hugging Face Space (Docker SDK, port 7860).
-     Hugging Face reads it; on GitHub it renders as a small table at the top. -->
+> **Live demo:** _<!-- add your Cloud Run URL here after deploying, e.g. https://rag-assistant-xxxx.a.run.app -->_ **← paste the live link here**
 
 Upload your PDFs, DOCX, TXT, or Markdown, ask questions, and get **streaming,
 grounded answers with clickable source citations** — plus a live **evaluation
@@ -89,8 +76,8 @@ top retrieved passage), so you can demo the retrieval half offline.
 
 ```bash
 docker build -t docmind .
-docker run -p 7860:7860 -e LLM_API_KEY=... -e LLM_BASE_URL=https://api.groq.com/openai/v1 -e LLM_MODEL=llama-3.1-8b-instant docmind
-#    open http://localhost:7860
+docker run -p 8080:8080 -e LLM_API_KEY=... -e LLM_BASE_URL=https://api.groq.com/openai/v1 -e LLM_MODEL=llama-3.1-8b-instant docmind
+#    open http://localhost:8080
 ```
 
 ## API
@@ -157,7 +144,7 @@ ui/streamlit_app.py  upload · streaming chat · citations · eval dashboard
 eval/                recall@k · MRR · faithfulness · answer relevance
 tests/               pytest: chunking, retrieval, citations
 docs/                ARCHITECTURE.md · DEPLOY.md
-Dockerfile · run.sh  single-container backend + UI (Hugging Face Spaces ready)
+Dockerfile · run.sh  single-container backend + UI (Cloud Run ready)
 ```
 
 ## How it works
