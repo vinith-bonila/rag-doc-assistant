@@ -5,7 +5,7 @@
 ![Built with Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B)
 ![Tests: pytest](https://img.shields.io/badge/tests-pytest-0A9EDC)
 
-> **🔗 Live demo:** _<!-- paste your Streamlit Cloud URL here, e.g. https://docmind.streamlit.app -->_ **← add the live link after deploying**
+> **🔗 Live demo: [docmind-x.streamlit.app](https://docmind-x.streamlit.app/)**
 
 Upload your PDFs, DOCX, TXT, or Markdown, ask questions, and get **streaming,
 grounded answers with clickable source citations** — plus a live **evaluation
@@ -250,7 +250,7 @@ All settings live in `config.py`, overridable via environment / Streamlit secret
 - Built and deployed a production-style RAG document assistant (FastAPI, FAISS,
   hybrid **dense + BM25** retrieval with RRF fusion, **cross-encoder reranking**)
   serving **grounded, cited, streaming** answers — deployed free on Streamlit
-  Community Cloud. _[live link]_
+  Community Cloud. **[Live demo](https://docmind-x.streamlit.app/)**
 - Implemented a RAG **evaluation pipeline** (recall@k, MRR, faithfulness, answer
   relevance) surfaced in a live dashboard — **recall@5 1.00, MRR 0.96,
   faithfulness 0.78**.
