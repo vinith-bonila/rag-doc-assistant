@@ -23,10 +23,33 @@ class FaissStore:
         self.index = faiss.IndexFlatIP(dim)
         self.chunks: List[Chunk] = []
 
+    @property
+    def dim(self) -> int:
+        return self.index.d
+
     def add(self, vectors: np.ndarray, chunks: List[Chunk]) -> None:
         assert vectors.shape[0] == len(chunks), "vectors/chunks length mismatch"
         self.index.add(vectors)
         self.chunks.extend(chunks)
+
+    def reconstruct_all(self) -> np.ndarray:
+        """Return the stored vectors as a fresh (n, dim) array. Lets callers
+        rebuild the index without re-embedding (IndexFlatIP is exact-storage)."""
+        n = self.index.ntotal
+        if n == 0:
+            return np.zeros((0, self.index.d), dtype="float32")
+        return self.index.reconstruct_n(0, n)
+
+    def rebuild(self, vectors: np.ndarray, chunks: List[Chunk]) -> None:
+        """Replace the entire contents with the given vectors + chunks.
+
+        A brand-new IndexFlatIP is created and the old one is dropped, so the
+        memory backing any removed/replaced vectors is released (not just the
+        Python wrapper — FAISS frees the C++ buffer when the index is GC'd)."""
+        self.index = faiss.IndexFlatIP(self.index.d)
+        self.chunks = []
+        if len(chunks):
+            self.add(vectors, chunks)
 
     def search(self, query_vec: np.ndarray, k: int) -> List[Tuple[Chunk, float]]:
         if query_vec.ndim == 1:

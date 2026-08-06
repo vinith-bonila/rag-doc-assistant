@@ -34,3 +34,26 @@ def test_add_documents_rejects_unsupported_type(tmp_path):
     pipe = RAGPipeline(index_dir=str(tmp_path / "idx2"))
     with pytest.raises(ValueError):
         pipe.add_documents([("malware.exe", b"MZ...")])
+
+
+def test_reupload_replaces_without_growth(tmp_path):
+    # Re-uploading the same filename must replace its chunks (releasing the old
+    # vectors), not duplicate them — otherwise repeated uploads leak memory.
+    pipe = RAGPipeline(index_dir=str(tmp_path / "idx3"))
+    base = len(pipe.store.chunks)
+
+    pipe.add_documents([("a.txt", b"The quokka is a small marsupial from Australia.")])
+    assert len(pipe.store.chunks) == base + 1
+
+    summary = pipe.add_documents([("a.txt", b"The axolotl is a regenerating amphibian.")])
+    assert len(pipe.store.chunks) == base + 1          # no duplicate growth
+    assert summary["total_chunks"] == base + 1
+
+    # ids stay unique after the rebuild, and the index size matches the chunks.
+    ids = [c.chunk_id for c in pipe.store.chunks]
+    assert len(ids) == len(set(ids))
+    assert pipe.store.index.ntotal == len(pipe.store.chunks)
+
+    # The old content is gone; the new content is retrievable.
+    text = " ".join(c.text for c, _ in pipe.retrieve("axolotl amphibian", k=5)).lower()
+    assert "axolotl" in text and "quokka" not in text

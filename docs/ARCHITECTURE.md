@@ -47,6 +47,27 @@ The pipeline is deliberately cheap to construct and light to hold:
   container), the pipeline builds one from the bundled sample docs at startup,
   reusing its own embedder.
 
+### Memory lifecycle (bounded growth)
+
+The app is meant to run for a long time on a small (~1 GB) instance, so growth is
+bounded on every axis:
+
+- **Repeated uploads don't accumulate.** Re-uploading a file (same name)
+  **replaces** its chunks instead of appending duplicates. `add_documents`
+  rebuilds the store from the kept chunks + the new ones via a brand-new
+  `IndexFlatIP`; the old index is dropped and FAISS frees the C++ buffer backing
+  the replaced vectors. Kept vectors are recovered with `reconstruct_all()` (no
+  re-embedding, no second persistent copy).
+- **Temporary embeddings are transient.** The `(n, dim)` array from
+  `embedder.encode` is copied into FAISS by `index.add` and then released; nothing
+  holds a long-lived duplicate.
+- **The cache holds exactly one pipeline.** `st.cache_resource(load_pipeline)`
+  takes no arguments, so it has a single entry — it can't grow into an unbounded
+  keyed cache (and no `st.cache_data` is used).
+- **Chat history is capped.** The per-session transcript keeps only the most
+  recent turns (`MAX_HISTORY_TURNS`); Streamlit frees the whole session state when
+  the session ends.
+
 ## Retrieval, in two stages
 
 **Stage 1 — Hybrid candidate generation (`retrieval.py`).**

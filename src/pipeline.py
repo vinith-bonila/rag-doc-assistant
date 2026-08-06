@@ -16,6 +16,8 @@ import threading
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
+import numpy as np
+
 from config import settings
 
 from .chunking import Chunk
@@ -112,26 +114,45 @@ class RAGPipeline:
     def add_documents(self, files: List[Tuple[str, bytes]]) -> dict:
         """Parse, chunk, embed and index uploaded files at runtime, then persist.
 
-        Returns a small summary (per-file chunk counts + new total). Rebuilds the
-        BM25 side of the hybrid retriever, which must see the full chunk set.
+        Re-uploading a file (same name) **replaces** its previous chunks rather
+        than appending duplicates: the old vectors are dropped and the index is
+        rebuilt, so repeated uploads don't grow memory without bound. Returns a
+        summary (per-file chunk counts + new total).
         """
         # Validate/parse everything up front so a bad file fails before we mutate
         # the shared index.
         parsed = [(filename, parse_bytes(filename, data)) for filename, data in files]
         with self._lock:
             added: List[dict] = []
+            new_chunks: List[Chunk] = []
             for filename, segments in parsed:
-                chunks = chunk_document(filename, segments, self.embedder,
-                                        start_id=len(self.store.chunks))
-                if not chunks:
-                    added.append({"filename": filename, "chunks_added": 0})
-                    continue
-                vectors = self.embedder.encode([c.text for c in chunks])
-                self.store.add(vectors, chunks)
-                added.append({"filename": filename, "chunks_added": len(chunks)})
+                file_chunks = chunk_document(filename, segments, self.embedder)
+                new_chunks.extend(file_chunks)
+                added.append({"filename": filename, "chunks_added": len(file_chunks)})
 
-            self._retriever = None           # force BM25 rebuild over the full set on next use
-            self.store.save(self.index_dir)  # persist so the new docs survive restart
+            # Sources present in this batch replace any prior version of the same
+            # file. Keep the rest and reuse their stored vectors (no re-embedding).
+            replaced = {c.source for c in new_chunks}
+            old_vectors = self.store.reconstruct_all()
+            keep = [i for i, c in enumerate(self.store.chunks) if c.source not in replaced]
+            kept_chunks = [self.store.chunks[i] for i in keep]
+            kept_vectors = old_vectors[keep] if keep else np.zeros(
+                (0, self.embedder.dim), dtype="float32")
+
+            if new_chunks:
+                new_vectors = self.embedder.encode([c.text for c in new_chunks])
+                all_vectors = np.vstack([kept_vectors, new_vectors])
+            else:
+                all_vectors = kept_vectors
+            all_chunks = kept_chunks + new_chunks
+
+            # Reassign contiguous ids so they stay unique after removals.
+            for new_id, chunk in enumerate(all_chunks):
+                chunk.chunk_id = new_id
+
+            self.store.rebuild(all_vectors, all_chunks)  # drops the old index/vectors
+            self._retriever = None            # rebuild BM25 over the new chunk set on next use
+            self.store.save(self.index_dir)   # persist so the new docs survive restart
             return {"files": added, "total_chunks": len(self.store.chunks)}
 
     def retrieve(self, query: str, k: Optional[int] = None

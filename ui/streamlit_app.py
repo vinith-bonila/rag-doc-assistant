@@ -29,6 +29,11 @@ import streamlit as st
 
 st.set_page_config(page_title="DocMind — RAG Assistant", page_icon="📄", layout="wide")
 
+# Cap the in-session chat log so a long-running session can't grow memory without
+# bound (each turn retains the answer text + all cited passages). Older turns
+# scroll out of memory; Streamlit frees the whole log when the session ends.
+MAX_HISTORY_TURNS = 25
+
 # --- secrets bridge -----------------------------------------------------------
 # Copy Streamlit secrets into the environment BEFORE importing config/pipeline,
 # because config.py reads settings from env at import time. On Streamlit Cloud
@@ -146,6 +151,8 @@ with tab_chat:
                 if sources:
                     render_citations(sources)
                 st.session_state.history.append((question, answer, sources))
+                # Keep only the most recent turns so memory stays bounded.
+                del st.session_state.history[:-MAX_HISTORY_TURNS]
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Generation failed: {exc}")
 
