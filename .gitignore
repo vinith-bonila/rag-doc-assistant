@@ -6,3 +6,5 @@ storage/
 venv/
 *.faiss
 .claude/
+.streamlit/secrets.toml
+.cache/

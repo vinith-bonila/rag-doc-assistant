@@ -1,103 +1,103 @@
 """DocMind — Streamlit front-end for the RAG document assistant.
 
-Talks to the FastAPI backend over HTTP:
-  * uploads documents            -> POST /upload
-  * streams grounded answers     -> POST /ask/stream  (Server-Sent Events)
-  * runs the evaluation harness  -> POST /eval
+This is the single deployable app for Streamlit Community Cloud. It runs the RAG
+pipeline **in-process** (no separate backend to keep alive), so the whole thing
+— upload, streaming chat, citations, evaluation — works from one Streamlit
+interface within the platform's free RAM.
 
-Set the backend location with the API_URL environment variable
-(default http://localhost:8000). When frontend and backend run in the same
-process/host — e.g. one Hugging Face Space — the default is correct.
+Memory notes:
+  * The pipeline (and its models) is built once via ``st.cache_resource`` and
+    reused across reruns and users — Streamlit reruns the script top-to-bottom
+    on every interaction, so without this the models would reload constantly.
+  * Models are lazy-loaded inside the pipeline; the single embedder instance is
+    reused for indexing, retrieval and the embedding-based eval metrics.
+
+The FastAPI service in ``api/`` is preserved for local/API use and is not needed
+here — see the README.
 """
 from __future__ import annotations
 
-import json
 import os
-from typing import Dict, Iterator, List, Tuple
+import sys
+
+# Streamlit puts THIS file's directory (ui/) on sys.path, not the repo root, so
+# make the repo root importable for `src`, `config`, and `eval`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
-import requests
 import streamlit as st
-
-API_URL = os.getenv("API_URL", "http://localhost:8000").rstrip("/")
-REQUEST_TIMEOUT = 120
 
 st.set_page_config(page_title="DocMind — RAG Assistant", page_icon="📄", layout="wide")
 
+# --- secrets bridge -----------------------------------------------------------
+# Copy Streamlit secrets into the environment BEFORE importing config/pipeline,
+# because config.py reads settings from env at import time. On Streamlit Cloud
+# you set these under the app's "Secrets"; locally they come from a .env.
+_SECRET_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL",
+                "EMBED_MODEL", "RERANKER_MODEL", "HYBRID")
 
-# --- backend helpers ----------------------------------------------------------
-def get_health() -> Dict:
+
+def _bridge_secrets() -> None:
     try:
-        return requests.get(f"{API_URL}/health", timeout=10).json()
-    except requests.RequestException:
-        return {}
+        secrets = st.secrets
+    except Exception:
+        return
+    for key in _SECRET_KEYS:
+        try:
+            if key in secrets and secrets[key]:
+                os.environ.setdefault(key, str(secrets[key]))
+        except Exception:
+            continue
 
 
-def upload_files(files) -> Dict:
-    payload = [("files", (f.name, f.getvalue(), f.type or "application/octet-stream"))
-               for f in files]
-    r = requests.post(f"{API_URL}/upload", files=payload, timeout=REQUEST_TIMEOUT)
-    if r.status_code != 200:
-        raise RuntimeError(r.json().get("detail", r.text))
-    return r.json()
+_bridge_secrets()
 
 
-def stream_answer(question: str) -> Tuple[Iterator[str], List[dict]]:
-    """Return a token generator plus a list that fills with sources as the
-    first SSE event arrives. Streamlit's st.write_stream consumes the generator;
-    afterwards the sources list is populated."""
-    sources: List[dict] = []
-    resp = requests.post(f"{API_URL}/ask/stream", json={"question": question},
-                         stream=True, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
-
-    def tokens() -> Iterator[str]:
-        event = None
-        for raw in resp.iter_lines(decode_unicode=True):
-            if raw is None or raw == "":
-                continue
-            if raw.startswith("event:"):
-                event = raw[len("event:"):].strip()
-            elif raw.startswith("data:"):
-                data = raw[len("data:"):].strip()
-                if event == "sources":
-                    sources.extend(json.loads(data))
-                elif event == "token":
-                    yield json.loads(data)["delta"]
-                elif event == "error":
-                    yield f"\n\n⚠️ {json.loads(data).get('message', 'generation error')}"
-
-    return tokens(), sources
+# --- cached pipeline ----------------------------------------------------------
+@st.cache_resource(show_spinner="Loading models and index (first run only)…")
+def load_pipeline():
+    # Imported here (not at module top) so the secrets bridge above has already
+    # populated the environment that config.py reads.
+    from src.pipeline import RAGPipeline
+    return RAGPipeline()
 
 
-def run_eval() -> Dict:
-    r = requests.post(f"{API_URL}/eval", timeout=600)
-    r.raise_for_status()
-    return r.json()
+def status(pipe) -> dict:
+    return {
+        "chunks": len(pipe.store.chunks),
+        "hybrid": _settings().hybrid,
+        "llm": _settings().has_llm,
+    }
 
 
-def render_citations(sources: List[dict]) -> None:
+def _settings():
+    from config import settings
+    return settings
+
+
+def render_citations(sources) -> None:
     st.caption("Sources — click to open the exact retrieved passage")
     for i, s in enumerate(sources, start=1):
-        page = f" · p.{s['page']}" if s.get("page") is not None else ""
-        label = f"[{i}] {s['source']}{page}  ·  score {s['score']:.2f}"
+        page = f" · p.{s.page}" if s.page is not None else ""
+        label = f"[{i}] {s.source}{page}  ·  score {s.score:.2f}"
         with st.expander(label):
-            st.write(s["text"])
+            st.write(s.text)
 
 
 # --- sidebar ------------------------------------------------------------------
 st.sidebar.title("📄 DocMind")
 st.sidebar.caption("Hybrid retrieval · cross-encoder rerank · grounded, cited, streaming answers")
 
-health = get_health()
-if health:
-    st.sidebar.success(
-        f"Backend online · {health.get('chunks', 0)} chunks\n\n"
-        f"hybrid: {'on' if health.get('hybrid') else 'off'} · "
-        f"LLM: {'on' if health.get('llm') else 'retrieval-only'}"
-    )
-else:
-    st.sidebar.error(f"Backend unreachable at {API_URL}")
+pipe = load_pipeline()
+stat = status(pipe)
+st.sidebar.success(
+    f"Ready · {stat['chunks']} chunks\n\n"
+    f"hybrid: {'on' if stat['hybrid'] else 'off'} · "
+    f"LLM: {'on' if stat['llm'] else 'retrieval-only'}"
+)
+if not stat["llm"]:
+    st.sidebar.info("No LLM key set — answers show the top retrieved passage. "
+                    "Add `LLM_API_KEY` in Secrets to enable grounded generation.")
 
 st.sidebar.subheader("Add documents")
 uploaded = st.sidebar.file_uploader(
@@ -106,9 +106,10 @@ uploaded = st.sidebar.file_uploader(
     accept_multiple_files=True,
 )
 if st.sidebar.button("Index uploaded files", disabled=not uploaded):
-    with st.sidebar.status("Indexing..."):
+    with st.sidebar.status("Indexing…"):
         try:
-            result = upload_files(uploaded)
+            payloads = [(f.name, f.getvalue()) for f in uploaded]
+            result = pipe.add_documents(payloads)
             added = sum(f["chunks_added"] for f in result["files"])
             st.sidebar.success(f"Added {added} chunks · {result['total_chunks']} total")
         except Exception as exc:  # noqa: BLE001
@@ -139,13 +140,14 @@ with tab_chat:
             st.write(question)
         with st.chat_message("assistant"):
             try:
-                token_gen, sources = stream_answer(question)
+                # answer_stream returns citations immediately + a token generator.
+                sources, token_gen = pipe.answer_stream(question)
                 answer = st.write_stream(token_gen)
                 if sources:
                     render_citations(sources)
                 st.session_state.history.append((question, answer, sources))
             except Exception as exc:  # noqa: BLE001
-                st.error(f"Request failed: {exc}")
+                st.error(f"Generation failed: {exc}")
 
 with tab_eval:
     st.subheader("Retrieval & answer quality")
@@ -154,9 +156,10 @@ with tab_eval:
         "vs. generation — on a small labelled evaluation set."
     )
     if st.button("Run evaluation"):
-        with st.status("Running the evaluation harness (this calls the LLM per question)…"):
+        with st.status("Running the evaluation harness (calls the LLM per question)…"):
             try:
-                st.session_state.eval = run_eval()
+                from eval.evaluate import run_eval
+                st.session_state.eval = run_eval(pipe)
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Eval failed: {exc}")
 

@@ -18,7 +18,10 @@ class Embedder:
 
     @property
     def dim(self) -> int:
-        return self.model.get_sentence_embedding_dimension()
+        # Method was renamed across sentence-transformers versions; support both.
+        getter = getattr(self.model, "get_embedding_dimension", None) \
+            or self.model.get_sentence_embedding_dimension
+        return getter()
 
     def encode(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
         """Return L2-normalized float32 embeddings, shape (n, dim)."""

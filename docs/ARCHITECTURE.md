@@ -1,34 +1,51 @@
 # Architecture
 
-DocMind is a two-service app — a FastAPI backend and a Streamlit frontend —
-around a retrieve → rerank → generate pipeline. Everything is typed, modular,
-and dependency-injected so each stage is swappable and testable.
+DocMind is built around one typed, modular `retrieve → rerank → generate`
+pipeline. It runs in **two interchangeable front doors**, both calling the same
+`RAGPipeline`:
 
-## Request flow
+- **Streamlit app (`ui/`)** — the deployed product. Calls the pipeline
+  **in-process** (no network hop), so the whole thing fits one free Streamlit
+  Community Cloud service.
+- **FastAPI service (`api/`)** — the same pipeline exposed as REST + SSE, with
+  Pydantic validation, structured logging, and rate limiting. Preserved for API
+  use and local dev.
+
+## Request flow (deployed: Streamlit, in-process)
 
 ```
-                    ┌──────────────────────────── Streamlit UI (ui/) ───────────────────────────┐
-                    │  upload area   ·   streaming chat   ·   citations panel   ·   eval board   │
-                    └───────┬───────────────────┬──────────────────────────────────┬────────────┘
-                     POST /upload         POST /ask/stream (SSE)                POST /eval
-                            │                    │                                  │
-                    ┌───────▼────────────────────▼──────────────────────────────────▼────────────┐
-                    │                           FastAPI backend (api/)                             │
-                    │        Pydantic validation · structured logging · slowapi rate limits        │
-                    └───────┬────────────────────┬──────────────────────────────────┬────────────┘
-                            │                    │                                  │
-                     add_documents()       answer_stream()                      run_eval()
-                            │                    │                                  │
-             ┌──────────────▼─────────┐   ┌──────▼───────────────────────────┐   ┌──▼───────────────┐
-             │ ingest.py              │   │ pipeline.py (RAGPipeline)        │   │ evaluate.py      │
-             │ parse (pdf/docx/txt/md)│   │                                  │   │ recall@k · MRR   │
-             │ → chunk (+page meta)   │   │  1. retrieval.py  hybrid search  │   │ faithfulness     │
-             │ → embed → FAISS        │   │       dense (FAISS) + BM25 (RRF) │   │ answer relevance │
-             └────────────────────────┘   │  2. reranker.py   cross-encoder  │   └──────────────────┘
-                                          │  3. llm.py        grounded, cited│
-                                          │                   streaming answer│
-                                          └──────────────────────────────────┘
+        ┌──────────────────────────── Streamlit UI (ui/streamlit_app.py) ───────────────────────────┐
+        │  upload area   ·   streaming chat   ·   citations panel   ·   evaluation dashboard          │
+        │  one cached RAGPipeline (st.cache_resource) · models lazy-loaded on first use               │
+        └───────┬────────────────────────┬───────────────────────────────────────┬───────────────────┘
+         add_documents()           answer_stream()                            run_eval()
+                │                        │                                        │
+   ┌────────────▼─────────┐   ┌──────────▼───────────────────────────┐   ┌────────▼─────────┐
+   │ ingest.py            │   │ pipeline.py (RAGPipeline)            │   │ evaluate.py      │
+   │ parse pdf/docx/txt/md│   │  1. retrieval.py  hybrid search      │   │ recall@k · MRR   │
+   │ → chunk (+page meta) │   │       dense (FAISS) + BM25 (RRF)     │   │ faithfulness     │
+   │ → embed → FAISS      │   │  2. reranker.py   cross-encoder      │   │ answer relevance │
+   └──────────────────────┘   │  3. llm.py        grounded, cited,   │   └──────────────────┘
+                              │                   streaming answer   │
+                              └──────────────────────────────────────┘
+
+The FastAPI service (api/main.py) wraps the SAME pipeline methods as HTTP:
+   POST /upload → add_documents()   POST /ask/stream (SSE) → answer_stream()   POST /eval → run_eval()
 ```
+
+## Memory & lazy loading
+
+The pipeline is deliberately cheap to construct and light to hold:
+
+- **Lazy models.** `embedder`, `reranker`, and the LLM `generator` are `@property`
+  singletons built on first access — booting the app only loads the (tiny) FAISS
+  index. The first query is when models actually load.
+- **Single instance, no duplicates.** One embedder is reused for indexing,
+  retrieval, and the embedding-based eval metrics. `st.cache_resource` keeps a
+  single pipeline per Streamlit server across reruns and users.
+- **Self-healing index.** If no persisted index exists (fresh Streamlit Cloud
+  container), the pipeline builds one from the bundled sample docs at startup,
+  reusing its own embedder.
 
 ## Retrieval, in two stages
 

@@ -1,12 +1,10 @@
-# Deploying DocMind
+# Deploying DocMind (free)
 
-The app ships as a single Docker container that runs the FastAPI backend and the
-Streamlit UI together. The public entrypoint is the Streamlit UI on `$PORT`; it
-calls the FastAPI backend on `127.0.0.1:8000` inside the container.
+DocMind deploys **free** on **Streamlit Community Cloud** — no billing account, no
+credit card. The Streamlit app runs the RAG pipeline in-process, so there's only
+one service to host.
 
-We deploy in two steps: push the code to **GitHub**, then deploy the container to
-**Google Cloud Run** from **Cloud Shell** (browser-based — no local Docker or
-gcloud install needed).
+Two steps: push to **GitHub**, then point **Streamlit Community Cloud** at the repo.
 
 ---
 
@@ -28,94 +26,67 @@ gcloud install needed).
 
 ---
 
-## Part B — Google Cloud Run
+## Part B — Streamlit Community Cloud
 
-### One-time prerequisites
+1. Go to <https://share.streamlit.io> and sign in with GitHub. Authorize access to
+   your repo if prompted.
+2. Click **Create app** → **Deploy a public app from GitHub**.
+3. Fill in:
+   - **Repository**: `<your-username>/rag-doc-assistant`
+   - **Branch**: `main`
+   - **Main file path**: `ui/streamlit_app.py`
+4. Open **Advanced settings → Secrets** and paste (TOML format):
 
-- A Google account.
-- A Google Cloud **project** with **billing enabled**. Cloud Run's free monthly
-  allowance is generous (well beyond a demo), but Google requires a billing
-  account on file to enable the service. You won't be charged within the free
-  tier. Create/select a project at <https://console.cloud.google.com>.
-
-### Deploy from Cloud Shell
-
-1. Open **Cloud Shell** (the `>_` icon, top-right of the Cloud Console). It's a
-   free browser terminal with `gcloud` and Docker preinstalled.
-
-2. Clone your repo and enter it:
-
-   ```bash
-   git clone https://github.com/<your-username>/rag-doc-assistant.git
-   cd rag-doc-assistant
+   ```toml
+   LLM_API_KEY = "your-groq-key"
+   LLM_BASE_URL = "https://api.groq.com/openai/v1"
+   LLM_MODEL = "llama-3.1-8b-instant"
    ```
 
-3. Set your project and enable the needed APIs (first time only):
+   The app reads these into its config at startup (see the secrets bridge in
+   `ui/streamlit_app.py`). Without a key it still runs retrieval + reranking.
+5. Click **Deploy**. First boot installs dependencies, downloads the MiniLM +
+   cross-encoder models, and builds the sample index (a couple of minutes). When
+   it's live, copy the `https://<something>.streamlit.app` URL into the README's
+   top line and commit.
 
-   ```bash
-   gcloud config set project <YOUR_PROJECT_ID>
-   gcloud services enable run.googleapis.com cloudbuild.googleapis.com
-   ```
+### Memory notes (Streamlit Cloud has ~1 GB RAM)
 
-4. Deploy. Cloud Build builds the Dockerfile and Cloud Run serves it. Replace the
-   LLM values with yours (Groq shown):
+Already handled in code, but good to understand:
 
-   ```bash
-   gcloud run deploy rag-assistant \
-     --source . \
-     --region us-central1 \
-     --allow-unauthenticated \
-     --memory 2Gi \
-     --cpu 1 \
-     --timeout 3600 \
-     --session-affinity \
-     --max-instances 1 \
-     --set-env-vars LLM_API_KEY=YOUR_GROQ_KEY,LLM_BASE_URL=https://api.groq.com/openai/v1,LLM_MODEL=llama-3.1-8b-instant
-   ```
+- **One cached pipeline.** `ui/streamlit_app.py` builds the pipeline via
+  `st.cache_resource`, so models load once and are reused across reruns/users
+  (Streamlit reruns the whole script on every interaction).
+- **Lazy loading.** The embedder, reranker, and LLM client are constructed on
+  first use, so boot stays light; the single embedder instance is reused for
+  indexing, retrieval, and the embedding-based eval metrics — no model is ever
+  loaded twice.
+- **Small models.** MiniLM-class embedder + cross-encoder (~90 MB each) are chosen
+  for the RAM/quality tradeoff.
 
-   The first build takes several minutes (installs deps, downloads the MiniLM +
-   cross-encoder models, builds the sample index into the image). When it
-   finishes, gcloud prints a **Service URL** like
-   `https://rag-assistant-xxxxxxxx-uc.a.run.app` — that's your live link.
+If you ever hit the memory limit, the cheapest wins are: keep `HYBRID=true` but
+lower `RETRIEVE_K`, or disable the reranker via a smaller shortlist.
 
-5. Open the URL. Paste it into the README's top line and commit:
+### Notes
 
-   ```bash
-   git commit -am "Add live Cloud Run URL to README" && git push
-   ```
-
-### Why these flags
-
-| Flag | Why |
-|---|---|
-| `--memory 2Gi` | The backend loads PyTorch + two transformer models (~600–900 MB resident). 2 GiB gives headroom; 512 MB would OOM. |
-| `--session-affinity` | Streamlit uses a websocket; affinity keeps a client pinned to one instance so the socket stays stable. |
-| `--max-instances 1` | Uploads mutate the in-container FAISS index; a single instance keeps that state consistent for the demo. |
-| `--timeout 3600` | Allows long-lived websocket / streaming connections. |
-| `--allow-unauthenticated` | Makes it a public demo URL. |
-
-### Better: keep the key in Secret Manager (optional)
-
-Instead of `--set-env-vars` for the key, store it as a secret:
-
-```bash
-echo -n "YOUR_GROQ_KEY" | gcloud secrets create llm-api-key --data-file=-
-gcloud run services update rag-assistant --region us-central1 \
-  --update-secrets LLM_API_KEY=llm-api-key:latest \
-  --set-env-vars LLM_BASE_URL=https://api.groq.com/openai/v1,LLM_MODEL=llama-3.1-8b-instant
-```
+- **Uploads are ephemeral.** Streamlit Cloud's filesystem resets on restart/redeploy,
+  so user-uploaded docs don't persist across restarts. The bundled sample corpus
+  always ships in the repo. Durable uploads would need an external vector store
+  (out of scope for v1).
+- **Updating the app.** Push to `main`; Streamlit Cloud auto-redeploys.
 
 ---
 
-## Notes
+## Alternative: Docker (self-host)
 
-- **Uploads are ephemeral.** The container filesystem resets on new revisions /
-  scale-to-zero, so user-uploaded docs don't persist across restarts. The bundled
-  sample corpus always ships in the image. Durable uploads would need a mounted
-  volume or an external vector store (out of scope for v1).
-- **Cold starts.** With `--max-instances 1` and scale-to-zero, the first request
-  after idle spins the container up (a few seconds, plus model load). Set
-  `--min-instances 1` to avoid cold starts (leaves one instance warm; uses more
-  of the free allowance).
-- **First query is slow-ish** on 1 vCPU (CPU inference for embed + rerank).
-  Bump `--cpu 2` if you want snappier responses.
+The repo also ships a Dockerfile that runs the same Streamlit app:
+
+```bash
+docker build -t docmind .
+docker run -p 8501:8501 \
+  -e LLM_API_KEY=... -e LLM_BASE_URL=https://api.groq.com/openai/v1 -e LLM_MODEL=llama-3.1-8b-instant \
+  docmind
+```
+
+Useful for any container host or local runs; Streamlit Community Cloud remains the
+free, zero-ops path.

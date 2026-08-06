@@ -109,8 +109,11 @@ def load_documents(docs_dir: str) -> List[Tuple[str, List[Segment]]]:
     return docs
 
 
-def build_index(docs_dir: str, out_dir: str) -> None:
-    embedder = Embedder(settings.embed_model)
+def build_index(docs_dir: str, out_dir: str,
+                embedder: Optional[Embedder] = None) -> None:
+    # Reuse the caller's embedder when given (e.g. the pipeline's) so the model
+    # isn't loaded twice; otherwise construct one for standalone CLI use.
+    embedder = embedder or Embedder(settings.embed_model)
     docs = load_documents(docs_dir)
     if not docs:
         raise SystemExit(f"No supported documents found in {docs_dir!r}")
