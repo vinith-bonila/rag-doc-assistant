@@ -125,6 +125,9 @@ if st.sidebar.button("Index uploaded files", disabled=not uploaded):
             payloads = [(f.name, f.getvalue()) for f in uploaded]
             result = pipe.add_documents(payloads)
             added = sum(f["chunks_added"] for f in result["files"])
+            # Remember these as the user's own docs so chat is scoped to them.
+            st.session_state.setdefault("uploaded_sources", set()).update(
+                f.name for f in uploaded)
             st.sidebar.success(f"Added {added} chunks · {result['total_chunks']} total")
         except Exception as exc:  # noqa: BLE001
             st.sidebar.error(str(exc))
@@ -140,6 +143,17 @@ tab_chat, tab_eval = st.tabs(["💬 Chat", "📊 Evaluation"])
 with tab_chat:
     if "history" not in st.session_state:
         st.session_state.history = []  # list of (question, answer, sources)
+
+    # Scope answers to the user's uploaded documents (intersected with what's
+    # actually still in the index, in case the container was rebooted). Without
+    # an upload we fall back to the whole index (the demo corpus).
+    _store_sources = {c.source for c in pipe.store.chunks}
+    scope_sources = (st.session_state.get("uploaded_sources", set()) & _store_sources) or None
+    if scope_sources:
+        st.caption("📄 Answering from your document(s): " + ", ".join(sorted(scope_sources)))
+    else:
+        st.caption("ℹ️ Using the built-in demo documents — upload a file and click "
+                   "**Index uploaded files** to focus answers on your own document.")
 
     for q, a, srcs in st.session_state.history:
         with st.chat_message("user"):
@@ -167,7 +181,8 @@ with tab_chat:
                 # Prior turns give the assistant conversation memory and let it
                 # rewrite follow-ups into standalone search queries.
                 turns = [(q, a) for q, a, _ in st.session_state.history]
-                sources, token_gen = pipe.answer_stream(question, history=turns)
+                sources, token_gen = pipe.answer_stream(
+                    question, history=turns, allowed_sources=scope_sources)
                 answer = st.write_stream(token_gen)
                 if sources:
                     render_citations(sources)

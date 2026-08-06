@@ -18,7 +18,7 @@ summing them lets one dominate arbitrarily. RRF ignores magnitudes and fuses on
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Protocol, Tuple
+from typing import Dict, List, Optional, Protocol, Set, Tuple
 
 import numpy as np
 from rank_bm25 import BM25Okapi
@@ -36,10 +36,22 @@ def _tokenize(text: str) -> List[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
-class Retriever(Protocol):
-    """Anything that turns a query into ranked (chunk, score) candidates."""
+Sources = Optional[Set[str]]  # restrict retrieval to these source filenames
 
-    def retrieve(self, query: str, k: int) -> List[Scored]:
+
+def _allowed(chunk: Chunk, allowed_sources: Sources) -> bool:
+    return allowed_sources is None or chunk.source in allowed_sources
+
+
+class Retriever(Protocol):
+    """Anything that turns a query into ranked (chunk, score) candidates.
+
+    ``allowed_sources`` scopes results to a set of source filenames (e.g. the
+    user's uploaded documents) so "summarize this document" doesn't pull from
+    other files sharing the index.
+    """
+
+    def retrieve(self, query: str, k: int, allowed_sources: Sources = None) -> List[Scored]:
         ...
 
 
@@ -50,9 +62,13 @@ class DenseRetriever:
         self.store = store
         self.embedder = embedder
 
-    def retrieve(self, query: str, k: int) -> List[Scored]:
+    def retrieve(self, query: str, k: int, allowed_sources: Sources = None) -> List[Scored]:
         q = self.embedder.encode([query])
-        return self.store.search(q, k)
+        if allowed_sources is None:
+            return self.store.search(q, k)
+        # Over-fetch, then filter to the allowed sources so we still return ~k.
+        hits = self.store.search(q, len(self.store.chunks))
+        return [(c, s) for c, s in hits if _allowed(c, allowed_sources)][:k]
 
 
 class BM25Retriever:
@@ -62,13 +78,18 @@ class BM25Retriever:
         self.chunks = chunks
         self._bm25 = BM25Okapi([_tokenize(c.text) for c in chunks]) if chunks else None
 
-    def retrieve(self, query: str, k: int) -> List[Scored]:
+    def retrieve(self, query: str, k: int, allowed_sources: Sources = None) -> List[Scored]:
         if not self._bm25:
             return []
         scores = self._bm25.get_scores(_tokenize(query))
-        k = min(k, len(self.chunks))
-        top = np.argsort(scores)[::-1][:k]
-        return [(self.chunks[i], float(scores[i])) for i in top]
+        out: List[Scored] = []
+        for i in np.argsort(scores)[::-1]:
+            chunk = self.chunks[i]
+            if _allowed(chunk, allowed_sources):
+                out.append((chunk, float(scores[i])))
+                if len(out) >= k:
+                    break
+        return out
 
 
 class HybridRetriever:
@@ -84,13 +105,13 @@ class HybridRetriever:
         self.retrievers = retrievers
         self.rrf_k = rrf_k
 
-    def retrieve(self, query: str, k: int) -> List[Scored]:
+    def retrieve(self, query: str, k: int, allowed_sources: Sources = None) -> List[Scored]:
         fused: Dict[int, float] = {}
         by_id: Dict[int, Chunk] = {}
         for retriever in self.retrievers:
             # Pull a few extra candidates per retriever so fusion has overlap
             # to work with before we trim back to k.
-            ranked = retriever.retrieve(query, k)
+            ranked = retriever.retrieve(query, k, allowed_sources=allowed_sources)
             for rank, (chunk, _score) in enumerate(ranked, start=1):
                 by_id[chunk.chunk_id] = chunk
                 fused[chunk.chunk_id] = fused.get(chunk.chunk_id, 0.0) + 1.0 / (self.rrf_k + rank)

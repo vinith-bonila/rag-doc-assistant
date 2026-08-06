@@ -173,16 +173,19 @@ class RAGPipeline:
             self.store.save(self.index_dir)   # persist so the new docs survive restart
             return {"files": added, "total_chunks": len(self.store.chunks)}
 
-    def retrieve(self, query: str, k: Optional[int] = None
+    def retrieve(self, query: str, k: Optional[int] = None,
+                 allowed_sources: Optional[set] = None
                  ) -> List[Tuple[Chunk, float]]:
         with self._lock:
-            return self.retriever.retrieve(query, k or settings.retrieve_k)
+            return self.retriever.retrieve(query, k or settings.retrieve_k,
+                                           allowed_sources=allowed_sources)
 
-    def _rerank(self, query: str, k: Optional[int], top_n: Optional[int]
+    def _rerank(self, query: str, k: Optional[int], top_n: Optional[int],
+                allowed_sources: Optional[set] = None
                 ) -> Tuple[List[Tuple[Chunk, float]], List[Source]]:
         """Retrieve -> rerank, returning both the reranked pairs (for the LLM)
         and the Source objects (for the response / UI citations)."""
-        candidates = self.retrieve(query, k)
+        candidates = self.retrieve(query, k, allowed_sources=allowed_sources)
         reranked = self.reranker.rerank(query, candidates,
                                         top_n or settings.rerank_top_n)
         sources = [
@@ -210,7 +213,8 @@ class RAGPipeline:
 
     def answer_stream(self, query: str, k: Optional[int] = None,
                       top_n: Optional[int] = None,
-                      history: Optional[List[Tuple[str, str]]] = None
+                      history: Optional[List[Tuple[str, str]]] = None,
+                      allowed_sources: Optional[set] = None
                       ) -> Tuple[List[Source], Iterator[str]]:
         """Streaming variant for the interactive assistant.
 
@@ -219,11 +223,13 @@ class RAGPipeline:
         For follow-ups, ``history`` is used two ways: retrieval runs on a
         standalone query rewritten from the conversation, and the generator also
         sees the recent turns so it can resolve references and stay coherent.
+        ``allowed_sources`` scopes retrieval to the user's uploaded documents.
         """
         search_query = query
         if history and self.generator is not None:
             search_query = self.generator.condense_query(history, query)
-        reranked, sources = self._rerank(search_query, k, top_n)
+        reranked, sources = self._rerank(search_query, k, top_n,
+                                         allowed_sources=allowed_sources)
         if self.generator is not None:
             token_iter = _stop_after_refusal(
                 self.generator.stream_answer(query, reranked, history=history))

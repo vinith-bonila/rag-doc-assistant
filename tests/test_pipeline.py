@@ -57,6 +57,17 @@ def test_add_documents_rejects_unsupported_type(tmp_path):
         pipe.add_documents([("malware.exe", b"MZ...")])
 
 
+def test_retrieval_scopes_to_uploaded_sources(tmp_path):
+    # After uploading their own doc, a user's query must not pull from the other
+    # documents in the shared index (the "summarize this document" bug).
+    pipe = RAGPipeline(index_dir=str(tmp_path / "idx_scope"))
+    pipe.add_documents([("mine.txt", b"Quarterly revenue rose on strong CPF throughput.")])
+
+    got = pipe.retrieve("summary", k=10, allowed_sources={"mine.txt"})
+    assert got, "expected at least one scoped result"
+    assert {c.source for c, _ in got} == {"mine.txt"}  # nothing from the sample corpus
+
+
 def test_reupload_replaces_without_growth(tmp_path):
     # Re-uploading the same filename must replace its chunks (releasing the old
     # vectors), not duplicate them — otherwise repeated uploads leak memory.

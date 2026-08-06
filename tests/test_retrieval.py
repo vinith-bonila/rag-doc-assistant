@@ -6,8 +6,8 @@ from src.chunking import Chunk
 from src.retrieval import BM25Retriever, HybridRetriever
 
 
-def _chunk(cid: int, text: str) -> Chunk:
-    return Chunk(text=text, source=f"s{cid}.md", chunk_id=cid)
+def _chunk(cid: int, text: str, source: str | None = None) -> Chunk:
+    return Chunk(text=text, source=source or f"s{cid}.md", chunk_id=cid)
 
 
 def test_bm25_finds_exact_keyword():
@@ -21,6 +21,16 @@ def test_bm25_finds_exact_keyword():
     assert ranked[0][0].chunk_id == 1  # the lexically matching chunk ranks first
 
 
+def test_bm25_scopes_to_allowed_sources():
+    chunks = [
+        _chunk(0, "drift detection in production", source="mine.pdf"),
+        _chunk(1, "drift detection in production", source="other.pdf"),
+    ]
+    bm25 = BM25Retriever(chunks)
+    ranked = bm25.retrieve("drift detection", k=5, allowed_sources={"mine.pdf"})
+    assert {c.source for c, _ in ranked} == {"mine.pdf"}  # other.pdf excluded
+
+
 def test_rrf_fusion_rewards_cross_list_agreement():
     # The point of fusion: a chunk both retrievers surface should beat a chunk
     # only one retriever surfaces, even at rank #1. Here c_common is #2 in BOTH
@@ -32,7 +42,7 @@ def test_rrf_fusion_rewards_cross_list_agreement():
         def __init__(self, order):
             self._order = order
 
-        def retrieve(self, query, k):
+        def retrieve(self, query, k, allowed_sources=None):
             return [(c, 1.0) for c in self._order][:k]
 
     dense = Fake([c_solo, c_common])    # c_solo #1, c_common #2
