@@ -4,9 +4,22 @@ from __future__ import annotations
 
 import os
 
-from src.ingest import chunk_document, parse_file
+from src.ingest import chunk_document, clean_pdf_text, parse_file
 
 DOCS = os.path.join("data", "sample_docs")
+
+
+def test_clean_pdf_text_repairs_extraction_artifacts():
+    # Simulate the broken glyphs real PDFs emit (built from codepoints so the
+    # test source stays ASCII): a "ti" barred-O, a "fi" ligature, a private-use
+    # bullet, and a replacement char.
+    raw = ("opera" + chr(0x019F) + "ons, " + chr(0xFB01) + "eld work "
+           + chr(0xF0B7) + " item " + chr(0xFFFD))
+    out = clean_pdf_text(raw)
+    assert "operations" in out and "field" in out
+    # none of the artifact codepoints survive
+    for cp in (0x019F, 0x0275, 0xFB01, 0xF0B7, 0xFFFD):
+        assert chr(cp) not in out
 
 
 def test_parse_pdf_preserves_page_numbers():

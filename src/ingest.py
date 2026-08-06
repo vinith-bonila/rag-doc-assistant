@@ -18,6 +18,8 @@ import glob
 import io
 import logging
 import os
+import re
+import unicodedata
 from typing import List, Optional, Tuple
 
 from config import settings
@@ -33,6 +35,36 @@ Segment = Tuple[Optional[int], str]
 
 SUPPORTED_EXTS = (".txt", ".md", ".pdf", ".docx")
 
+# Codepoints are written with chr() so this source stays pure ASCII (no fragile
+# literal glyphs). U+019F / U+0275 are the barred-O that broken PDF fonts emit
+# for a "ti" ligature; mapping back to "ti" is safe (they never occur in real
+# English / technical text). e.g. "opera<U+019F>ons" -> "operations".
+_LIGATURE_FIXES = {
+    chr(0x019F): "ti",   # LATIN CAPITAL LETTER O WITH MIDDLE TILDE
+    chr(0x0275): "ti",   # LATIN SMALL LETTER BARRED O
+}
+# Private-use area (U+E000-U+F8FF): font-specific glyphs (bullets, icons).
+_PUA_RE = re.compile("[" + chr(0xE000) + "-" + chr(0xF8FF) + "]")
+_PUA_BULLET = chr(0xF0B7)      # the most common private-use bullet glyph
+_BULLET = chr(0x2022)          # a real bullet
+_REPLACEMENT = chr(0xFFFD)     # replacement char from failed decodes
+
+
+def clean_pdf_text(text: str) -> str:
+    """Repair common PDF text-extraction artifacts.
+
+    1. NFKC expands real ligatures (U+FB00-FB06: ff, fi, fl, ffi, ...) to letters.
+    2. Known broken ligature mappings are corrected (see ``_LIGATURE_FIXES``).
+    3. Private-use glyphs become a real bullet or a space, and the replacement
+       char (U+FFFD) is stripped.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    for bad, good in _LIGATURE_FIXES.items():
+        text = text.replace(bad, good)
+    text = text.replace(_PUA_BULLET, _BULLET + " ")   # bullet glyph -> "* "
+    text = _PUA_RE.sub(" ", text)                     # any other private-use glyphs
+    return text.replace(_REPLACEMENT, " ")
+
 
 # --- parsing ------------------------------------------------------------------
 def _parse_pdf(data: bytes) -> List[Segment]:
@@ -40,7 +72,7 @@ def _parse_pdf(data: bytes) -> List[Segment]:
     reader = PdfReader(io.BytesIO(data))
     segments: List[Segment] = []
     for page_no, page in enumerate(reader.pages, start=1):
-        text = (page.extract_text() or "").strip()
+        text = clean_pdf_text(page.extract_text() or "").strip()
         if text:
             segments.append((page_no, text))
     return segments
