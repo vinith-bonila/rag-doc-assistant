@@ -1,0 +1,12 @@
+# Lint config. Deliberately lenient — this is a demo project, not a linting
+# gauntlet. We catch real errors (F) and basic style (E) but don't fail on line
+# length or import ordering noise.
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "E741"]  # line length; ambiguous var names (l/O/I)
+
+[lint.per-file-ignores]
+"tests/*" = ["F401"]

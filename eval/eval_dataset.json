@@ -1,0 +1,50 @@
+[
+  {
+    "question": "What process issue commonly causes edge-ring defects on a wafer?",
+    "expected_source": "wafer_defects.md"
+  },
+  {
+    "question": "Why is accuracy misleading when wafer defect classes are imbalanced?",
+    "expected_source": "wafer_defects.md"
+  },
+  {
+    "question": "How can an autoencoder help detect rare wafer defect patterns?",
+    "expected_source": "wafer_defects.md"
+  },
+  {
+    "question": "What does a donut defect pattern usually indicate?",
+    "expected_source": "wafer_defects.md"
+  },
+  {
+    "question": "Why is a cross-encoder reranker more accurate than bi-encoder retrieval?",
+    "expected_source": "rag_concepts.md"
+  },
+  {
+    "question": "What does recall@k measure in a RAG system?",
+    "expected_source": "rag_concepts.md"
+  },
+  {
+    "question": "How does semantic chunking differ from fixed-size chunking?",
+    "expected_source": "rag_concepts.md"
+  },
+  {
+    "question": "How does grounding reduce hallucination in RAG answers?",
+    "expected_source": "rag_concepts.md"
+  },
+  {
+    "question": "What is the difference between data drift and concept drift?",
+    "expected_source": "model_monitoring.docx"
+  },
+  {
+    "question": "How can a retrieval system degrade silently in production?",
+    "expected_source": "model_monitoring.docx"
+  },
+  {
+    "question": "When is a flat FAISS index a good choice for vector search?",
+    "expected_source": "vector_databases.pdf"
+  },
+  {
+    "question": "How does HNSW achieve fast approximate nearest neighbour search?",
+    "expected_source": "vector_databases.pdf"
+  }
+]

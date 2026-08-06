@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.env
+storage/
+.venv/
+venv/
+*.faiss
+.claude/
