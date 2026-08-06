@@ -80,8 +80,17 @@ def _settings():
     return settings
 
 
+STARTERS = [
+    "Summarize this document",
+    "What are the key points?",
+    "Explain it like I'm a beginner",
+    "List the action items",
+    "What are the risks or concerns?",
+]
+
+
 def render_citations(sources) -> None:
-    st.caption("Sources — click to open the exact retrieved passage")
+    st.caption("📚 **Sources** — click to open the exact retrieved passage")
     for i, s in enumerate(sources, start=1):
         page = f" · p.{s.page}" if s.page is not None else ""
         label = f"[{i}] {s.source}{page}  ·  score {s.score:.2f}"
@@ -123,7 +132,8 @@ if st.sidebar.button("Index uploaded files", disabled=not uploaded):
 
 # --- main ---------------------------------------------------------------------
 st.title("DocMind")
-st.caption("Ask questions across your documents and get streaming answers grounded in — and citing — the source passages.")
+st.caption("Upload a document and ask anything — summarize, explain, compare, translate, find risks or action items. "
+           "Answers are grounded in your document, cited, and followed by a plain-language explanation.")
 
 tab_chat, tab_eval = st.tabs(["💬 Chat", "📊 Evaluation"])
 
@@ -139,14 +149,25 @@ with tab_chat:
             if srcs:
                 render_citations(srcs)
 
-    question = st.chat_input("Ask a question about your documents…")
+    # NotebookLM-style starter prompts, shown only before the conversation begins.
+    picked = None
+    if not st.session_state.history:
+        st.caption("Try asking:")
+        cols = st.columns(len(STARTERS))
+        for col, starter in zip(cols, STARTERS):
+            if col.button(starter, use_container_width=True):
+                picked = starter
+
+    question = st.chat_input("Ask anything about your documents…") or picked
     if question:
         with st.chat_message("user"):
             st.write(question)
         with st.chat_message("assistant"):
             try:
-                # answer_stream returns citations immediately + a token generator.
-                sources, token_gen = pipe.answer_stream(question)
+                # Prior turns give the assistant conversation memory and let it
+                # rewrite follow-ups into standalone search queries.
+                turns = [(q, a) for q, a, _ in st.session_state.history]
+                sources, token_gen = pipe.answer_stream(question, history=turns)
                 answer = st.write_stream(token_gen)
                 if sources:
                     render_citations(sources)

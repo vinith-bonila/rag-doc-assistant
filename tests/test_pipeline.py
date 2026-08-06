@@ -1,7 +1,28 @@
 """Pipeline-level behaviour: streaming shape and live upload indexing."""
 from __future__ import annotations
 
-from src.pipeline import RAGPipeline
+from src.pipeline import RAGPipeline, _stop_after_refusal
+
+
+def test_stop_after_refusal_truncates_trailing_sections():
+    def fake_stream():
+        for t in ["📄 **According to the document**\n",
+                  "The uploaded document does not contain ",
+                  "enough information to answer this question.\n",
+                  "💡 **AI explanation**\n",
+                  "Some general knowledge that must NOT appear."]:
+            yield t
+    out = "".join(_stop_after_refusal(fake_stream()))
+    assert "does not contain enough information" in out
+    assert "💡" not in out and "must NOT appear" not in out
+
+
+def test_stop_after_refusal_passes_through_normal_answers():
+    def fake_stream():
+        for t in ["📄 grounded [1]\n", "💡 explanation\n", "🌍 example"]:
+            yield t
+    out = "".join(_stop_after_refusal(fake_stream()))
+    assert "💡 explanation" in out and "🌍 example" in out
 
 
 def test_answer_stream_returns_sources_then_tokens(pipeline):

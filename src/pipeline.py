@@ -47,6 +47,24 @@ class RAGResult:
     sources: List[Source]
 
 
+# The exact phrase the assistant prompt uses to refuse when the document lacks
+# the answer. We hard-stop the stream after it so the model can't tack on a
+# general-knowledge explanation the user didn't ask for.
+_REFUSAL_MARK = "does not contain enough information"
+
+
+def _stop_after_refusal(tokens: Iterator[str]) -> Iterator[str]:
+    buf = ""
+    tripped = False
+    for delta in tokens:
+        yield delta
+        buf += delta
+        if not tripped and _REFUSAL_MARK in buf.lower():
+            tripped = True
+        if tripped and "\n" in delta:      # end of the refusal line -> stop
+            return
+
+
 class RAGPipeline:
     def __init__(self, index_dir: Optional[str] = None,
                  bootstrap_docs: str = "data/sample_docs"):
@@ -191,14 +209,24 @@ class RAGPipeline:
         return RAGResult(query=query, answer=answer_text, sources=sources)
 
     def answer_stream(self, query: str, k: Optional[int] = None,
-                      top_n: Optional[int] = None
+                      top_n: Optional[int] = None,
+                      history: Optional[List[Tuple[str, str]]] = None
                       ) -> Tuple[List[Source], Iterator[str]]:
-        """Streaming variant: returns the citations immediately (so the UI can
-        render the sources panel right away) plus a generator that yields the
-        grounded answer token-by-token."""
-        reranked, sources = self._rerank(query, k, top_n)
+        """Streaming variant for the interactive assistant.
+
+        Returns the citations immediately (so the UI can render the sources panel
+        right away) plus a generator that streams the answer token-by-token.
+        For follow-ups, ``history`` is used two ways: retrieval runs on a
+        standalone query rewritten from the conversation, and the generator also
+        sees the recent turns so it can resolve references and stay coherent.
+        """
+        search_query = query
+        if history and self.generator is not None:
+            search_query = self.generator.condense_query(history, query)
+        reranked, sources = self._rerank(search_query, k, top_n)
         if self.generator is not None:
-            token_iter = self.generator.stream_answer(query, reranked)
+            token_iter = _stop_after_refusal(
+                self.generator.stream_answer(query, reranked, history=history))
         else:
             def _fallback() -> Iterator[str]:
                 yield self._no_llm_answer(reranked)

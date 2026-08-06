@@ -7,13 +7,17 @@
 
 > **🔗 Live demo: [docmind-x.streamlit.app](https://docmind-x.streamlit.app/)**
 
-Upload your PDFs, DOCX, TXT, or Markdown, ask questions, and get **streaming,
-grounded answers with clickable source citations** — plus a live **evaluation
-dashboard** that scores retrieval and answer quality. Built as a production-shaped
-RAG system: **hybrid dense + BM25 retrieval**, **cross-encoder reranking**, and a
-real metrics harness. Ships as one **Streamlit** app (running the pipeline
-in-process) with a **FastAPI** service preserved in the repo, and deploys **free**
-on Streamlit Community Cloud.
+An **AI document assistant** (NotebookLM-style) for *any* document — reports,
+research papers, resumes, SOPs, manuals, legal/financial/medical docs, source
+code, books. Upload PDFs/DOCX/TXT/Markdown and ask anything in plain language
+("summarize this", "explain like I'm new", "find the risks", "compare these
+sections"). Every answer is **grounded in your document and cited**, then followed
+by a plain-language explanation — with **streaming**, **conversation memory** for
+follow-ups, and a live **evaluation dashboard**. Built as a production-shaped RAG
+system: **hybrid dense + BM25 retrieval**, **cross-encoder reranking**, and a real
+metrics harness. Ships as one **Streamlit** app (pipeline in-process) with a
+**FastAPI** service preserved in the repo, and deploys **free** on Streamlit
+Community Cloud.
 
 ## Metrics (real, on the bundled eval set)
 
@@ -35,8 +39,16 @@ Measured by the built-in harness over 12 labelled questions — reproduce with
   fused with Reciprocal Rank Fusion so neither score scale dominates.
 - 🎯 **Cross-encoder reranking** — a shortlist re-scored by a model that reads
   query and passage together; its scores show next to each citation.
-- 💬 **Grounded, cited, streaming answers** — answers only from retrieved context,
-  cites passages inline as `[n]`, admits when it doesn't know, streams token-by-token.
+- 💬 **Grounded, cited, streaming answers** — a 📄 *grounded* section (only from
+  retrieved context, cited inline as `[n]`, refuses when the doc doesn't cover it)
+  followed by a clearly-separated 💡 *plain-language explanation* and an optional
+  🌍 example. Streams token-by-token.
+- 🧠 **Conversation memory** — follow-ups work ("Explain CPF." → "Why is *it*
+  important?"): the follow-up is rewritten into a standalone query before retrieval,
+  and recent turns are fed to the model.
+- 🗣️ **Any document, any request** — domain-agnostic; understands natural-language
+  intents (summarize, explain, compare, translate, rewrite, find action items /
+  risks / conclusions, make interview questions) with no predefined commands.
 - 🔗 **Clickable citations** — every answer's sources appear in a panel; click one
   to read the exact retrieved passage (with PDF page number).
 - 📊 **Evaluation dashboard** — recall@k, MRR, faithfulness, answer relevance as
