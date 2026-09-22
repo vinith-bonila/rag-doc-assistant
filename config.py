@@ -43,7 +43,7 @@ class Settings:
     # --- LLM (OpenAI-compatible) -----------------------------------------
     # Works with OpenAI, or any OpenAI-compatible endpoint. To use Groq's free
     # tier instead, set LLM_BASE_URL=https://api.groq.com/openai/v1 and
-    # LLM_MODEL=llama-3.1-8b-instant with a Groq key. No key => retrieval-only.
+    # LLM_MODEL=openai/gpt-oss-20b with a Groq key. No key => retrieval-only.
     llm_api_key: str = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
     llm_model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")

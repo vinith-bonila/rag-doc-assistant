@@ -44,7 +44,7 @@ Two steps: push to **GitHub**, then point **Streamlit Community Cloud** at the r
    ```toml
    LLM_API_KEY = "your-groq-key"
    LLM_BASE_URL = "https://api.groq.com/openai/v1"
-   LLM_MODEL = "llama-3.1-8b-instant"
+   LLM_MODEL = "openai/gpt-oss-20b"
    ```
 
    The app reads these into its config at startup (see the secrets bridge in
@@ -88,7 +88,7 @@ The repo also ships a Dockerfile that runs the same Streamlit app:
 ```bash
 docker build -t docmind .
 docker run -p 8501:8501 \
-  -e LLM_API_KEY=... -e LLM_BASE_URL=https://api.groq.com/openai/v1 -e LLM_MODEL=llama-3.1-8b-instant \
+  -e LLM_API_KEY=... -e LLM_BASE_URL=https://api.groq.com/openai/v1 -e LLM_MODEL=openai/gpt-oss-20b \
   docmind
 ```
 

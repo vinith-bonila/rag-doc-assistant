@@ -62,7 +62,7 @@ Measured by the built-in harness over 12 labelled questions — reproduce with
 |---|---|
 | Frontend | Streamlit |
 | Backend (in repo) | FastAPI (REST + SSE streaming) |
-| LLM | Groq (`llama-3.1-8b-instant`) — any OpenAI-compatible endpoint |
+| LLM | Groq (`openai/gpt-oss-20b`) — any OpenAI-compatible endpoint |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` |
 | Vector DB | FAISS (inner-product = cosine) |
 | Retrieval | BM25 (`rank-bm25`) + FAISS, fused with RRF |
@@ -180,7 +180,7 @@ python -m eval.evaluate              # run the eval harness in the terminal
 
 ```bash
 docker build -t docmind .
-docker run -p 8501:8501 -e LLM_API_KEY=... -e LLM_BASE_URL=https://api.groq.com/openai/v1 -e LLM_MODEL=llama-3.1-8b-instant docmind
+docker run -p 8501:8501 -e LLM_API_KEY=... -e LLM_BASE_URL=https://api.groq.com/openai/v1 -e LLM_MODEL=openai/gpt-oss-20b docmind
 #    open http://localhost:8501
 ```
 
@@ -193,7 +193,7 @@ docker run -p 8501:8501 -e LLM_API_KEY=... -e LLM_BASE_URL=https://api.groq.com/
    ```toml
    LLM_API_KEY = "your-groq-key"
    LLM_BASE_URL = "https://api.groq.com/openai/v1"
-   LLM_MODEL = "llama-3.1-8b-instant"
+   LLM_MODEL = "openai/gpt-oss-20b"
    ```
 4. Deploy. You get a public `*.streamlit.app` URL — put it at the top of this README.
 
