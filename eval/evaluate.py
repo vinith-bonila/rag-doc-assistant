@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from typing import Dict, List, Optional
 
 import numpy as np
 
 from src.pipeline import RAGPipeline
+from src.validation import validate_citations
 
 logger = logging.getLogger("docmind.eval")
 
@@ -52,6 +54,42 @@ def _reciprocal_rank(sources: List, expected: str) -> float:
         if s.source == expected:
             return 1.0 / rank
     return 0.0
+
+
+def _ndcg_at_k(rels: List[int], k: int) -> float:
+    """Normalised discounted cumulative gain for binary relevance labels."""
+    rels = rels[:k]
+    dcg = sum(r / math.log2(i + 2) for i, r in enumerate(rels))
+    idcg = sum(r / math.log2(i + 2) for i, r in enumerate(sorted(rels, reverse=True)))
+    return dcg / idcg if idcg else 0.0
+
+
+def retrieval_eval(pipeline: RAGPipeline, questions: Optional[List[dict]] = None,
+                   k: int = RECALL_K) -> Dict:
+    """Deterministic retrieval-only metrics (no LLM) — safe to run as a CI gate.
+    Relevance is at the source-document level (a chunk is relevant if it comes
+    from the question's expected source)."""
+    questions = questions or load_questions()
+    n = len(questions)
+    recall = precision = ndcg = mrr = 0.0
+    zero = 0
+    for q in questions:
+        expected = q["expected_source"]
+        srcs = [c.source for c, _ in pipeline.retrieve(q["question"], k=k)]
+        if not srcs:
+            zero += 1
+        rels = [1 if sdoc == expected else 0 for sdoc in srcs]
+        if any(rels):
+            recall += 1
+        precision += (sum(rels) / len(rels)) if rels else 0.0
+        ndcg += _ndcg_at_k(rels, k)
+        for rank, sdoc in enumerate(srcs, start=1):
+            if sdoc == expected:
+                mrr += 1.0 / rank
+                break
+    return {f"recall@{k}": recall / n, f"precision@{k}": precision / n,
+            f"ndcg@{k}": ndcg / n, "retrieval_mrr": mrr / n,
+            "zero_result_rate": zero / n, "k": k, "n": n}
 
 
 def faithfulness_llm(pipeline: RAGPipeline, answer: str, contexts: List[str]) -> float:
@@ -103,20 +141,16 @@ def run_eval(pipeline: RAGPipeline, k: int = RECALL_K,
     n = len(questions)
     use_llm = pipeline.generator is not None
 
-    recall_hits = 0
+    # Deterministic retrieval metrics (no LLM).
+    ret = retrieval_eval(pipeline, questions, k)
+
     rr_sum = 0.0
     faith_scores: List[float] = []
     rel_scores: List[float] = []
+    cite_scores: List[float] = []   # per answer with >=1 citation: all valid?
 
     for q in questions:
         expected = q["expected_source"]
-
-        # Retrieval-stage recall over the top-k candidates.
-        retrieved = pipeline.retrieve(q["question"], k=k)
-        if expected in {c.source for c, _ in retrieved}:
-            recall_hits += 1
-
-        # Answer + reranked sources (used for MRR, faithfulness, relevance).
         # Guard the LLM-dependent work so one transient error (e.g. a rate limit)
         # degrades to NaN for that question instead of aborting the whole run.
         try:
@@ -128,6 +162,9 @@ def run_eval(pipeline: RAGPipeline, k: int = RECALL_K,
             else:
                 faith_scores.append(faithfulness_embedding(pipeline, result.answer, contexts))
             rel_scores.append(answer_relevance(pipeline, q["question"], result.answer))
+            rep = validate_citations(result.answer, len(result.sources))
+            if rep.n_citations:
+                cite_scores.append(1.0 if rep.ok else 0.0)
         except Exception:  # noqa: BLE001
             logger.exception("eval failed for question: %r", q["question"])
             faith_scores.append(float("nan"))
@@ -135,32 +172,33 @@ def run_eval(pipeline: RAGPipeline, k: int = RECALL_K,
 
     faith_valid = [s for s in faith_scores if not np.isnan(s)]
     rel_valid = [s for s in rel_scores if not np.isnan(s)]
+
+    def _mean(xs):
+        return round(float(np.mean(xs)), 3) if xs else float("nan")
+
     metrics = [
-        {
-            "name": f"recall@{k}",
-            "value": round(recall_hits / n, 3),
-            "explanation": (f"Share of questions whose correct source document appears "
-                            f"in the top-{k} retrieved chunks — measures the retriever."),
-        },
-        {
-            "name": "MRR",
-            "value": round(rr_sum / n, 3),
-            "explanation": ("Mean reciprocal rank of the first correct passage after "
-                            "reranking (1.0 = always ranked first) — measures ordering."),
-        },
-        {
-            "name": "faithfulness",
-            "value": round(float(np.mean(faith_valid)), 3) if faith_valid else float("nan"),
-            "explanation": ("Fraction of the answer's claims supported by the retrieved "
-                            "context — higher means less hallucination."
-                            + ("" if use_llm else " (embedding fallback: no LLM key).")),
-        },
-        {
-            "name": "answer relevance",
-            "value": round(float(np.mean(rel_valid)), 3) if rel_valid else float("nan"),
-            "explanation": ("Semantic similarity between question and answer — catches "
-                            "evasive or off-topic answers."),
-        },
+        {"name": f"recall@{k}", "value": round(ret[f"recall@{k}"], 3),
+         "explanation": f"Share of questions whose correct source is in the top-{k} "
+                        "retrieved chunks — measures the retriever."},
+        {"name": f"precision@{k}", "value": round(ret[f"precision@{k}"], 3),
+         "explanation": f"Share of the top-{k} retrieved chunks that are relevant."},
+        {"name": "MRR", "value": round(rr_sum / n, 3),
+         "explanation": "Mean reciprocal rank of the first correct passage after "
+                        "reranking (1.0 = always first) — measures ordering."},
+        {"name": f"NDCG@{k}", "value": round(ret[f"ndcg@{k}"], 3),
+         "explanation": "Rank quality with a log position discount, normalised to the "
+                        "ideal ordering."},
+        {"name": "faithfulness", "value": _mean(faith_valid),
+         "explanation": "Fraction of answer claims supported by the retrieved context "
+                        "— less hallucination." + ("" if use_llm else " (embedding fallback).")},
+        {"name": "answer relevance", "value": _mean(rel_valid),
+         "explanation": "Semantic similarity between question and answer — catches "
+                        "evasive or off-topic answers."},
+        {"name": "citation validity", "value": _mean(cite_scores),
+         "explanation": "Share of cited answers whose every [n] marker maps to a real "
+                        "retrieved source (deterministic check)."},
+        {"name": "zero-result rate", "value": round(ret["zero_result_rate"], 3),
+         "explanation": "Share of questions that retrieved nothing (lower is better)."},
     ]
     return {"metrics": metrics, "n_questions": n, "llm_judge": use_llm}
 

@@ -26,6 +26,7 @@ from config import settings
 
 from .chunking import Chunk, recursive_chunk, semantic_chunk
 from .embeddings import Embedder
+from .metadata import stamp_metadata
 from .vectorstore import FaissStore
 
 logger = logging.getLogger(__name__)
@@ -66,15 +67,63 @@ def clean_pdf_text(text: str) -> str:
     return text.replace(_REPLACEMENT, " ")
 
 
+# --- table extraction (rag.pdf p.6) -------------------------------------------
+def _table_to_markdown(table) -> str:
+    """Serialise a pdfplumber table (list of rows) to a Markdown table so each
+    number stays attached to its row/column header instead of flattening into a
+    bag of numbers."""
+    rows = []
+    for row in table or []:
+        cells = ["" if c is None else " ".join(str(c).split()) for c in row]
+        if any(cells):
+            rows.append(cells)
+    if not rows:
+        return ""
+    ncols = max(len(r) for r in rows)
+    rows = [r + [""] * (ncols - len(r)) for r in rows]
+    md = ["| " + " | ".join(rows[0]) + " |",
+          "| " + " | ".join(["---"] * ncols) + " |"]
+    md += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+    return "\n".join(md)
+
+
+def _extract_tables(data: bytes) -> dict:
+    """Return {1-indexed page: [markdown table, ...]} using pdfplumber. Best
+    effort — any failure degrades to 'no tables' rather than breaking ingestion."""
+    try:
+        import pdfplumber
+    except Exception:  # noqa: BLE001 — optional dependency
+        return {}
+    out: dict = {}
+    try:
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            for i, page in enumerate(pdf.pages, start=1):
+                mds = [m for t in (page.extract_tables() or [])
+                       if (m := _table_to_markdown(t))]
+                if mds:
+                    out[i] = mds
+    except Exception:  # noqa: BLE001
+        logger.warning("table extraction failed; continuing without tables", exc_info=True)
+    return out
+
+
 # --- parsing ------------------------------------------------------------------
 def _parse_pdf(data: bytes) -> List[Segment]:
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
+    tables = _extract_tables(data) if settings.parse_tables else {}
     segments: List[Segment] = []
     for page_no, page in enumerate(reader.pages, start=1):
         text = clean_pdf_text(page.extract_text() or "").strip()
+        page_tables = tables.get(page_no, [])
+        if page_tables:  # keep tables on the same page as their surrounding text
+            text = (text + "\n\n" + "\n\n".join(page_tables)).strip()
         if text:
             segments.append((page_no, text))
+        else:
+            # No extractable text/tables: likely an image-only/scanned page. We
+            # flag it (OCR is out of scope) rather than silently indexing nothing.
+            logger.info("page %d of a PDF has no extractable text (image-only?)", page_no)
     return segments
 
 
@@ -152,8 +201,10 @@ def build_index(docs_dir: str, out_dir: str,
 
     all_chunks: List[Chunk] = []
     for source, segments in docs:
-        all_chunks.extend(chunk_document(source, segments, embedder,
-                                         start_id=len(all_chunks)))
+        doc_chunks = chunk_document(source, segments, embedder, start_id=len(all_chunks))
+        text = "\n".join(t for _, t in segments).encode("utf-8")
+        stamp_metadata(doc_chunks, source, text, settings.embed_model)
+        all_chunks.extend(doc_chunks)
 
     logger.info("Loaded %d document(s) -> %d chunks [%s]",
                 len(docs), len(all_chunks), settings.chunk_strategy)
