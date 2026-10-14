@@ -21,6 +21,8 @@ import pandas as pd
 import streamlit as st
 
 import theme  # ui/theme.py (ui/ is on sys.path when Streamlit runs this file)
+from src.trace import RAGTrace            # light modules (no torch/config import)
+from src.validation import validate_citations
 
 st.set_page_config(page_title="DocMind — AI Document Intelligence", page_icon="◆",
                    layout="wide", initial_sidebar_state="expanded")
@@ -82,7 +84,9 @@ store_map: dict = {}
 for c in pipe.store.chunks:
     store_map[c.source] = store_map.get(c.source, 0) + 1
 uploaded = st.session_state.get("uploaded_sources", set()) & set(store_map)
-scope_sources = uploaded or None
+# An explicit document filter (right panel) overrides the auto-scope.
+_filter_sel = set(st.session_state.get("doc_filter") or []) & set(store_map)
+scope_sources = _filter_sel or (uploaded or None)
 st.session_state.setdefault("section", "Chat")
 st.session_state.setdefault("history", [])
 NAV = ["Chat", "Documents", "Knowledge Base", "Collections",
@@ -183,6 +187,17 @@ def render_stats() -> None:
                 f'<div class="l">CHUNKS INDEXED</div></div>', unsafe_allow_html=True)
 
 
+def render_doc_filter() -> None:
+    """Metadata filter: restrict retrieval to chosen documents (rag.pdf p.8/10).
+    The selection is read back at boot and enforced inside retrieval."""
+    if len(store_map) <= 1:
+        return
+    M('<div class="dm-eyebrow">FILTER TO DOCUMENTS</div>')
+    st.multiselect("Restrict answers to", options=sorted(store_map),
+                   key="doc_filter", label_visibility="collapsed",
+                   placeholder="All documents")
+
+
 def render_error(exc: Exception) -> None:
     M('<div class="dm-answerlabel" style="color:var(--magenta)">SOMETHING INTERRUPTED '
       'THE KNOWLEDGE FLOW</div>')
@@ -230,6 +245,40 @@ def how_answer_found(retrieved, reranked) -> None:
             for i, (t, d) in enumerate(steps)))
 
 
+def render_validation(rep) -> None:
+    """Live citation-validation badge (rag.pdf p.14)."""
+    if rep.n_citations == 0:
+        return
+    if rep.ok:
+        M('<div class="dm-meta"><span class="ok">✓ Citations verified</span>'
+          f'<span>{rep.n_citations} inline citation(s), all map to a source</span></div>')
+    else:
+        bad = ", ".join(f"[{m}]" for m in rep.invalid_markers)
+        M('<div class="dm-meta"><span style="color:var(--magenta)">⚠ '
+          f'{len(rep.invalid_markers)} citation(s) flagged</span>'
+          f'<span>{bad} point(s) to no source</span></div>')
+
+
+def render_trace(trace: RAGTrace, latency: float) -> None:
+    with st.expander("Trace · observability"):
+        d = trace.as_dict()
+        rows = [("total (end-to-end)", f"{latency*1000:.0f} ms")]
+        rows += [(k, f"{v:.0f} ms") for k, v in d.get("stages_ms", {}).items()]
+        if "candidates_retrieved" in d:
+            rows.append(("candidates retrieved", str(d["candidates_retrieved"])))
+        ctx = d.get("context", {})
+        if ctx:
+            rows.append(("context (kept/in)", f"{ctx.get('kept')}/{ctx.get('input')}"
+                                              f"  ·  ~{ctx.get('context_tokens_est')} tok"))
+            if ctx.get("dropped_duplicates"):
+                rows.append(("deduped", str(ctx["dropped_duplicates"])))
+        rows.append(("trace id", d.get("trace_id", "")))
+        M("".join(
+            f'<div class="dm-engine" style="margin-bottom:.3rem"><div class="row" '
+            f'style="border:none;margin:0;padding:.1rem 0">{k}<b>{v}</b></div></div>'
+            for k, v in rows))
+
+
 # ============================================================================
 # QUERY
 # ============================================================================
@@ -243,9 +292,10 @@ def run_query(question: str, workspace) -> None:
                 M(theme.rag_pipeline())
             try:
                 turns = [(q, a) for q, a, *_ in st.session_state.history]
+                trace = RAGTrace()
                 t0 = time.time()
                 sources, token_gen = pipe.answer_stream(
-                    question, history=turns, allowed_sources=scope_sources)
+                    question, history=turns, allowed_sources=scope_sources, trace=trace)
                 M('<div class="dm-answerlabel">AI ANSWER</div>')
                 answer = st.write_stream(token_gen)
                 latency = time.time() - t0
@@ -254,8 +304,10 @@ def run_query(question: str, workspace) -> None:
                            if scope_sources else len(pipe.store.chunks))
                 retrieved = min(s.retrieve_k, scope_n)
                 render_meta(sources, retrieved, latency)
+                render_validation(validate_citations(answer, len(sources)))
                 render_sources(sources)
                 how_answer_found(retrieved, len(sources))
+                render_trace(trace, latency)
                 st.session_state.history.append(
                     (question, answer, sources, (retrieved, latency)))
                 del st.session_state.history[:-MAX_HISTORY_TURNS]
@@ -374,6 +426,8 @@ def section_chat() -> None:
     with right:
         with st.container(border=True):
             render_upload_panel()
+            M('<div style="height:.5rem"></div>')
+            render_doc_filter()
             M('<div style="height:.5rem"></div>')
             render_recent_docs(6)
             M('<div style="height:.5rem"></div>')

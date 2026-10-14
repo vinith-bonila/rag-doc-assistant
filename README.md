@@ -248,14 +248,36 @@ All settings live in `config.py`, overridable via environment / Streamlit secret
 | `CHUNK_STRATEGY` | `recursive` | `recursive` or `semantic` |
 | `LLM_MODEL` | `gpt-4o-mini` | any OpenAI-compatible model |
 
+## Production hardening
+
+Beyond the core RAG loop, DocMind implements much of the *RAG in Production*
+reference ([`docs/PRODUCTION_RAG_AUDIT.md`](docs/PRODUCTION_RAG_AUDIT.md)):
+
+- **Table-aware parsing** — PDF tables are serialised to Markdown so a value stays
+  attached to its row/column labels (not a flattened bag of numbers).
+- **Rich metadata + filtering** — `doc_type`, `content_hash`, title and
+  parser/chunker/embedding versions on every chunk; retrieval is filterable by
+  document / type / page range (`MetaFilter`) and content-hash skips unchanged
+  re-uploads.
+- **Context construction** — near-duplicate dedup + a token budget before the LLM,
+  so citations align 1:1 with what the model saw.
+- **Live validation + injection defense** — every `[n]` citation is verified
+  against real sources; retrieved passages are delimited and treated as untrusted
+  data the model must not obey ([`docs/SECURITY.md`](docs/SECURITY.md)).
+- **Observability** — a per-query `RAGTrace` (per-stage timings + counts) shown in
+  the UI and logged as one structured line.
+- **Expanded evaluation** — Precision@K, NDCG@K, citation validity and
+  zero-result rate, with a deterministic **CI quality gate**
+  ([`docs/EVALUATION.md`](docs/EVALUATION.md)).
+
 ## Future improvements
 
+- Multi-user auth + tenant isolation + ACL-filtered retrieval (the `MetaFilter`
+  interface is ready for an `access`/`owner` field).
+- OCR for scanned/image-only pages (currently detected and flagged).
+- Approximate (HNSW/IVF) index + response/embedding caching at scale.
 - Agentic retrieval / query decomposition for multi-hop questions.
-- Persistent uploads (mounted volume or a hosted vector store) so user docs
-  survive restarts.
-- Conversational follow-ups with memory.
-- Multimodal parsing of tables/images in PDFs.
-- Multi-user auth + saved chat history.
+- Persistent uploads (mounted volume or a hosted vector store).
 
 ## Resume bullet points
 

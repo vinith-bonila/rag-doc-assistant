@@ -1,3 +1,8 @@
 # Shell scripts must stay LF or bash in the Linux container breaks on CR.
 *.sh text eol=lf
 run.sh text eol=lf
+
+# Binary assets — never apply line-ending conversion (would corrupt them).
+*.pdf binary
+*.docx binary
+*.faiss binary
