@@ -39,6 +39,24 @@ class Settings:
     chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "120"))
     # "semantic" (embedding-based breakpoints) or "recursive" (robust default).
     chunk_strategy: str = os.getenv("CHUNK_STRATEGY", "recursive")
+    # Extract tables from PDFs and serialise them to Markdown so numbers stay
+    # attached to their row/column labels (rag.pdf p.6). Set PARSE_TABLES=false
+    # to skip the (slower) table pass.
+    parse_tables: bool = os.getenv("PARSE_TABLES", "true").lower() in ("1", "true", "yes")
+
+    # --- Context construction (rag.pdf p.12) ------------------------------
+    # Drop near-duplicate reranked chunks whose token-set Jaccard overlap is at
+    # or above this before building the LLM context.
+    dedup_jaccard: float = float(os.getenv("DEDUP_JACCARD", "0.88"))
+    # Approximate token budget for the retrieved context sent to the model.
+    context_token_budget: int = int(os.getenv("CONTEXT_TOKEN_BUDGET", "3000"))
+
+    # --- Validation (rag.pdf p.14) ----------------------------------------
+    # Verify after generation that every [n] citation maps to a real source.
+    validate_citations: bool = os.getenv("VALIDATE_CITATIONS", "true").lower() in ("1", "true", "yes")
+
+    # --- Limits -----------------------------------------------------------
+    max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "20"))
 
     # --- LLM (OpenAI-compatible) -----------------------------------------
     # Works with OpenAI, or any OpenAI-compatible endpoint. To use Groq's free

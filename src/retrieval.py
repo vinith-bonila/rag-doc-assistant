@@ -18,13 +18,14 @@ summing them lets one dominate arbitrarily. RRF ignores magnitudes and fuses on
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Protocol, Set, Tuple
+from typing import Dict, List, Optional, Protocol, Tuple
 
 import numpy as np
 from rank_bm25 import BM25Okapi
 
 from .chunking import Chunk
 from .embeddings import Embedder
+from .metadata import MetaFilter
 from .vectorstore import FaissStore
 
 Scored = Tuple[Chunk, float]
@@ -36,22 +37,20 @@ def _tokenize(text: str) -> List[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
-Sources = Optional[Set[str]]  # restrict retrieval to these source filenames
-
-
-def _allowed(chunk: Chunk, allowed_sources: Sources) -> bool:
-    return allowed_sources is None or chunk.source in allowed_sources
+def _passes(chunk: Chunk, filt: Optional[MetaFilter]) -> bool:
+    return filt is None or filt.allows(chunk)
 
 
 class Retriever(Protocol):
     """Anything that turns a query into ranked (chunk, score) candidates.
 
-    ``allowed_sources`` scopes results to a set of source filenames (e.g. the
-    user's uploaded documents) so "summarize this document" doesn't pull from
-    other files sharing the index.
+    ``filt`` (a ``MetaFilter``) scopes results by source filename, document type
+    and page range — e.g. to the user's uploaded documents — so "summarize this
+    document" doesn't pull from other files sharing the index, and so an
+    authorization filter can be enforced inside retrieval.
     """
 
-    def retrieve(self, query: str, k: int, allowed_sources: Sources = None) -> List[Scored]:
+    def retrieve(self, query: str, k: int, filt: Optional[MetaFilter] = None) -> List[Scored]:
         ...
 
 
@@ -62,13 +61,13 @@ class DenseRetriever:
         self.store = store
         self.embedder = embedder
 
-    def retrieve(self, query: str, k: int, allowed_sources: Sources = None) -> List[Scored]:
+    def retrieve(self, query: str, k: int, filt: Optional[MetaFilter] = None) -> List[Scored]:
         q = self.embedder.encode([query])
-        if allowed_sources is None:
+        if filt is None:
             return self.store.search(q, k)
-        # Over-fetch, then filter to the allowed sources so we still return ~k.
+        # Over-fetch, then filter so we still return ~k.
         hits = self.store.search(q, len(self.store.chunks))
-        return [(c, s) for c, s in hits if _allowed(c, allowed_sources)][:k]
+        return [(c, s) for c, s in hits if _passes(c, filt)][:k]
 
 
 class BM25Retriever:
@@ -78,14 +77,14 @@ class BM25Retriever:
         self.chunks = chunks
         self._bm25 = BM25Okapi([_tokenize(c.text) for c in chunks]) if chunks else None
 
-    def retrieve(self, query: str, k: int, allowed_sources: Sources = None) -> List[Scored]:
+    def retrieve(self, query: str, k: int, filt: Optional[MetaFilter] = None) -> List[Scored]:
         if not self._bm25:
             return []
         scores = self._bm25.get_scores(_tokenize(query))
         out: List[Scored] = []
         for i in np.argsort(scores)[::-1]:
             chunk = self.chunks[i]
-            if _allowed(chunk, allowed_sources):
+            if _passes(chunk, filt):
                 out.append((chunk, float(scores[i])))
                 if len(out) >= k:
                     break
@@ -105,13 +104,14 @@ class HybridRetriever:
         self.retrievers = retrievers
         self.rrf_k = rrf_k
 
-    def retrieve(self, query: str, k: int, allowed_sources: Sources = None) -> List[Scored]:
+    def retrieve(self, query: str, k: int, filt: Optional[MetaFilter] = None) -> List[Scored]:
         fused: Dict[int, float] = {}
         by_id: Dict[int, Chunk] = {}
         for retriever in self.retrievers:
             # Pull a few extra candidates per retriever so fusion has overlap
-            # to work with before we trim back to k.
-            ranked = retriever.retrieve(query, k, allowed_sources=allowed_sources)
+            # to work with before we trim back to k. The filter is applied inside
+            # each retriever, so excluded docs can never be reintroduced by fusion.
+            ranked = retriever.retrieve(query, k, filt=filt)
             for rank, (chunk, _score) in enumerate(ranked, start=1):
                 by_id[chunk.chunk_id] = chunk
                 fused[chunk.chunk_id] = fused.get(chunk.chunk_id, 0.0) + 1.0 / (self.rrf_k + rank)

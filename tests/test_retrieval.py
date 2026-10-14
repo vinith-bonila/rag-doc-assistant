@@ -3,6 +3,7 @@ recall of the hybrid+rerank stack on the sample corpus."""
 from __future__ import annotations
 
 from src.chunking import Chunk
+from src.metadata import MetaFilter
 from src.retrieval import BM25Retriever, HybridRetriever
 
 
@@ -21,14 +22,26 @@ def test_bm25_finds_exact_keyword():
     assert ranked[0][0].chunk_id == 1  # the lexically matching chunk ranks first
 
 
-def test_bm25_scopes_to_allowed_sources():
+def test_bm25_scopes_to_source_filter():
     chunks = [
         _chunk(0, "drift detection in production", source="mine.pdf"),
         _chunk(1, "drift detection in production", source="other.pdf"),
     ]
     bm25 = BM25Retriever(chunks)
-    ranked = bm25.retrieve("drift detection", k=5, allowed_sources={"mine.pdf"})
+    ranked = bm25.retrieve("drift detection", k=5, filt=MetaFilter(sources={"mine.pdf"}))
     assert {c.source for c, _ in ranked} == {"mine.pdf"}  # other.pdf excluded
+
+
+def test_filter_by_doc_type():
+    chunks = [
+        _chunk(0, "revenue grew in the quarter", source="report.pdf"),
+        _chunk(1, "revenue grew in the quarter", source="notes.md"),
+    ]
+    chunks[0].meta["doc_type"] = "pdf"
+    chunks[1].meta["doc_type"] = "md"
+    bm25 = BM25Retriever(chunks)
+    ranked = bm25.retrieve("revenue", k=5, filt=MetaFilter(doc_types={"pdf"}))
+    assert {c.source for c, _ in ranked} == {"report.pdf"}
 
 
 def test_rrf_fusion_rewards_cross_list_agreement():
@@ -42,7 +55,7 @@ def test_rrf_fusion_rewards_cross_list_agreement():
         def __init__(self, order):
             self._order = order
 
-        def retrieve(self, query, k, allowed_sources=None):
+        def retrieve(self, query, k, filt=None):
             return [(c, 1.0) for c in self._order][:k]
 
     dense = Fake([c_solo, c_common])    # c_solo #1, c_common #2

@@ -68,6 +68,20 @@ def test_retrieval_scopes_to_uploaded_sources(tmp_path):
     assert {c.source for c, _ in got} == {"mine.txt"}  # nothing from the sample corpus
 
 
+def test_content_hash_skips_unchanged_reupload(tmp_path):
+    pipe = RAGPipeline(index_dir=str(tmp_path / "idx_hash"))
+    data = b"The pangolin is a scaly anteater found across Asia and Africa."
+    pipe.add_documents([("a.txt", data)])
+    n1 = len(pipe.store.chunks)
+    summary = pipe.add_documents([("a.txt", data)])   # identical bytes -> skip
+    assert len(pipe.store.chunks) == n1
+    assert summary["files"][0].get("status") == "unchanged"
+    # rich metadata is stamped on the chunks
+    ch = next(c for c in pipe.store.chunks if c.source == "a.txt")
+    assert ch.meta.get("doc_type") == "txt"
+    assert ch.meta.get("content_hash") and ch.meta.get("chunker_version")
+
+
 def test_reupload_replaces_without_growth(tmp_path):
     # Re-uploading the same filename must replace its chunks (releasing the old
     # vectors), not duplicate them — otherwise repeated uploads leak memory.

@@ -10,22 +10,27 @@ embedding-based eval metrics) so a model is never loaded twice.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
-from dataclasses import dataclass
-from typing import Iterator, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Iterator, List, Optional, Set, Tuple
 
 import numpy as np
 
 from config import settings
 
 from .chunking import Chunk
+from .context import build_context
 from .embeddings import Embedder
 from .ingest import build_index, chunk_document, parse_bytes
 from .llm import Generator
+from .metadata import MetaFilter, content_hash, stamp_metadata
 from .reranker import Reranker
 from .retrieval import Retriever, build_retriever
+from .trace import RAGTrace
+from .validation import flag_invalid_citations, validate_citations
 from .vectorstore import FaissStore
 
 logger = logging.getLogger("docmind.pipeline")
@@ -45,6 +50,20 @@ class RAGResult:
     query: str
     answer: str
     sources: List[Source]
+    validation: dict = field(default_factory=dict)
+    trace: dict = field(default_factory=dict)
+
+
+def _build_filter(allowed_sources: Optional[Set[str]],
+                  doc_types: Optional[Set[str]] = None) -> Optional[MetaFilter]:
+    if not allowed_sources and not doc_types:
+        return None
+    return MetaFilter(sources=set(allowed_sources) if allowed_sources else None,
+                      doc_types=set(doc_types) if doc_types else None)
+
+
+def _span(trace: Optional[RAGTrace], name: str):
+    return trace.span(name) if trace is not None else contextlib.nullcontext()
 
 
 # The exact phrase the assistant prompt uses to refuse when the document lacks
@@ -139,14 +158,28 @@ class RAGPipeline:
         """
         # Validate/parse everything up front so a bad file fails before we mutate
         # the shared index.
-        parsed = [(filename, parse_bytes(filename, data)) for filename, data in files]
+        parsed = [(filename, data, parse_bytes(filename, data)) for filename, data in files]
         with self._lock:
+            # content-hash of each already-indexed source (rag.pdf p.5/19: skip
+            # re-embedding an identical re-upload).
+            existing_hash = {c.source: (c.meta or {}).get("content_hash")
+                             for c in self.store.chunks}
             added: List[dict] = []
             new_chunks: List[Chunk] = []
-            for filename, segments in parsed:
+            for filename, data, segments in parsed:
+                if existing_hash.get(filename) == content_hash(data) \
+                        and filename in existing_hash:
+                    added.append({"filename": filename, "chunks_added": 0,
+                                  "status": "unchanged"})
+                    continue
                 file_chunks = chunk_document(filename, segments, self.embedder)
+                stamp_metadata(file_chunks, filename, data, settings.embed_model)
                 new_chunks.extend(file_chunks)
-                added.append({"filename": filename, "chunks_added": len(file_chunks)})
+                added.append({"filename": filename, "chunks_added": len(file_chunks),
+                              "status": "indexed"})
+
+            if not new_chunks:   # everything was unchanged -> nothing to rebuild
+                return {"files": added, "total_chunks": len(self.store.chunks)}
 
             # Sources present in this batch replace any prior version of the same
             # file. Keep the rest and reuse their stored vectors (no re-embedding).
@@ -174,67 +207,100 @@ class RAGPipeline:
             return {"files": added, "total_chunks": len(self.store.chunks)}
 
     def retrieve(self, query: str, k: Optional[int] = None,
-                 allowed_sources: Optional[set] = None
+                 allowed_sources: Optional[set] = None,
+                 doc_types: Optional[set] = None,
+                 filt: Optional[MetaFilter] = None
                  ) -> List[Tuple[Chunk, float]]:
         with self._lock:
-            return self.retriever.retrieve(query, k or settings.retrieve_k,
-                                           allowed_sources=allowed_sources)
+            f = filt if filt is not None else _build_filter(allowed_sources, doc_types)
+            return self.retriever.retrieve(query, k or settings.retrieve_k, filt=f)
 
     def _rerank(self, query: str, k: Optional[int], top_n: Optional[int],
-                allowed_sources: Optional[set] = None
+                allowed_sources: Optional[set] = None,
+                doc_types: Optional[set] = None,
+                trace: Optional[RAGTrace] = None
                 ) -> Tuple[List[Tuple[Chunk, float]], List[Source]]:
-        """Retrieve -> rerank, returning both the reranked pairs (for the LLM)
-        and the Source objects (for the response / UI citations)."""
-        candidates = self.retrieve(query, k, allowed_sources=allowed_sources)
-        reranked = self.reranker.rerank(query, candidates,
-                                        top_n or settings.rerank_top_n)
+        """Retrieve -> rerank -> build context, returning the context pairs (for
+        the LLM) and matching Source objects (for citations). Context construction
+        deduplicates near-identical passages and trims to a token budget, so the
+        [n] markers the model emits align 1:1 with the shown sources."""
+        f = _build_filter(allowed_sources, doc_types)
+        with _span(trace, "retrieve"):
+            candidates = self.retrieve(query, k, filt=f)
+        if trace is not None:
+            trace.set("candidates_retrieved", len(candidates))
+        with _span(trace, "rerank"):
+            reranked = self.reranker.rerank(query, candidates,
+                                            top_n or settings.rerank_top_n)
+        with _span(trace, "context"):
+            context_pairs, ctx_report = build_context(
+                reranked, settings.context_token_budget, settings.dedup_jaccard)
+        if trace is not None:
+            trace.set("context", ctx_report)
         sources = [
             Source(text=c.text, source=c.source, score=s, page=c.page,
                    chunk_id=c.chunk_id)
-            for c, s in reranked
+            for c, s in context_pairs
         ]
-        return reranked, sources
+        return context_pairs, sources
 
     @staticmethod
-    def _no_llm_answer(reranked: List[Tuple[Chunk, float]]) -> str:
+    def _no_llm_answer(context_pairs: List[Tuple[Chunk, float]]) -> str:
         # No LLM key configured: return the top passage as a stand-in so the
         # retrieval half of the system is still demonstrable end-to-end.
         return ("[No LLM configured — showing top retrieved passage]\n\n"
-                + (reranked[0][0].text if reranked else "No relevant context found."))
+                + (context_pairs[0][0].text if context_pairs else "No relevant context found."))
 
     def answer(self, query: str, k: Optional[int] = None,
-               top_n: Optional[int] = None) -> RAGResult:
-        reranked, sources = self._rerank(query, k, top_n)
-        if self.generator is not None:
-            answer_text = self.generator.answer(query, reranked)
-        else:
-            answer_text = self._no_llm_answer(reranked)
-        return RAGResult(query=query, answer=answer_text, sources=sources)
+               top_n: Optional[int] = None,
+               allowed_sources: Optional[set] = None,
+               doc_types: Optional[set] = None) -> RAGResult:
+        trace = RAGTrace()
+        context_pairs, sources = self._rerank(query, k, top_n, allowed_sources,
+                                              doc_types, trace)
+        with _span(trace, "generate"):
+            if self.generator is not None:
+                answer_text = self.generator.answer(query, context_pairs)
+            else:
+                answer_text = self._no_llm_answer(context_pairs)
+        report = validate_citations(answer_text, len(sources))
+        if settings.validate_citations and not report.ok:
+            answer_text = flag_invalid_citations(answer_text, len(sources))
+        trace.set("citations", {"status": report.status, "n": report.n_citations,
+                                "invalid": report.invalid_markers})
+        trace.log(logger)
+        return RAGResult(query=query, answer=answer_text, sources=sources,
+                         validation={"status": report.status,
+                                     "invalid_markers": report.invalid_markers,
+                                     "n_citations": report.n_citations},
+                         trace=trace.as_dict())
 
     def answer_stream(self, query: str, k: Optional[int] = None,
                       top_n: Optional[int] = None,
                       history: Optional[List[Tuple[str, str]]] = None,
-                      allowed_sources: Optional[set] = None
+                      allowed_sources: Optional[set] = None,
+                      doc_types: Optional[set] = None,
+                      trace: Optional[RAGTrace] = None
                       ) -> Tuple[List[Source], Iterator[str]]:
         """Streaming variant for the interactive assistant.
 
         Returns the citations immediately (so the UI can render the sources panel
-        right away) plus a generator that streams the answer token-by-token.
-        For follow-ups, ``history`` is used two ways: retrieval runs on a
-        standalone query rewritten from the conversation, and the generator also
-        sees the recent turns so it can resolve references and stay coherent.
-        ``allowed_sources`` scopes retrieval to the user's uploaded documents.
+        right away) plus a generator that streams the answer token-by-token. For
+        follow-ups, ``history`` rewrites the search query and is also shown to the
+        model. ``allowed_sources``/``doc_types`` scope retrieval. If a ``RAGTrace``
+        is passed it is filled with per-stage timings/counts for observability.
         """
         search_query = query
         if history and self.generator is not None:
-            search_query = self.generator.condense_query(history, query)
-        reranked, sources = self._rerank(search_query, k, top_n,
-                                         allowed_sources=allowed_sources)
+            with _span(trace, "condense"):
+                search_query = self.generator.condense_query(history, query)
+        context_pairs, sources = self._rerank(search_query, k, top_n,
+                                              allowed_sources, doc_types, trace)
         if self.generator is not None:
             token_iter = _stop_after_refusal(
-                self.generator.stream_answer(query, reranked, history=history))
+                self.generator.stream_answer(query, context_pairs, history=history))
         else:
             def _fallback() -> Iterator[str]:
-                yield self._no_llm_answer(reranked)
+                yield self._no_llm_answer(context_pairs)
             token_iter = _fallback()
         return sources, token_iter
