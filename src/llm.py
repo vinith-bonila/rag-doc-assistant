@@ -75,14 +75,42 @@ ASSISTANT_SYSTEM_PROMPT = (
 )
 
 
+# The fence that walls off untrusted document text. Document content is
+# *escaped* against it (``neutralize_delimiters``) because otherwise a file can
+# simply contain the closing marker, end its own block early, and have the text
+# that follows read as a prompt-level instruction - or forge an extra
+# ``<<<SOURCE [9] ...>>>`` block to fabricate a citation target.
+# See docs/SECURITY_AUDIT.md (DM-03).
+_FENCE_OPEN = "<<<"
+_FENCE_CLOSE = ">>>"
+_ZWSP = "\u200b"
+
+
+def neutralize_delimiters(text: str) -> str:
+    """Make document text unable to impersonate or close a SOURCE fence.
+
+    The angle-bracket runs that form the fence are interrupted with zero-width
+    spaces: the passage reads identically to a human and to the model, but can
+    no longer be parsed as a delimiter.
+    """
+    return (text.replace(_FENCE_OPEN, "<" + _ZWSP + "<" + _ZWSP + "<")
+                .replace(_FENCE_CLOSE, ">" + _ZWSP + ">" + _ZWSP + ">"))
+
+
 def _format_context(chunks: List[Chunk]) -> str:
     """Number and **delimit** each passage so the model (and the injection-defense
-    rule) can tell document data from instructions."""
+    rule) can tell document data from instructions.
+
+    Both the source label and the passage body are neutralised, so neither a
+    crafted filename nor crafted body text can break out of its fence.
+    """
     blocks = []
     for i, c in enumerate(chunks, start=1):
         loc = f", page {c.page}" if c.page is not None else ""
-        blocks.append(f"<<<SOURCE [{i}] source={c.source}{loc}>>>\n"
-                      f"{c.text}\n<<<END SOURCE [{i}]>>>")
+        label = neutralize_delimiters(str(c.source))
+        body = neutralize_delimiters(c.text)
+        blocks.append(f"<<<SOURCE [{i}] source={label}{loc}>>>\n"
+                      f"{body}\n<<<END SOURCE [{i}]>>>")
     return "\n\n".join(blocks)
 
 
@@ -96,9 +124,31 @@ def _history_messages(history: List[Turn], max_turns: int = 3,
     return msgs
 
 
+def _content_of(resp) -> str:
+    """First choice's message text, or "". ``content`` is Optional in the API (a
+    filtered or tool-only reply returns None), so dereferencing it directly
+    raises AttributeError (docs/SECURITY_AUDIT.md DM-07)."""
+    try:
+        choices = resp.choices or []
+        if not choices:
+            return ""
+        return (choices[0].message.content or "").strip()
+    except (AttributeError, IndexError):
+        return ""
+
+
 class Generator:
-    def __init__(self, api_key: str, base_url: str, model: str):
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+    """Thin OpenAI-compatible chat client.
+
+    An explicit ``timeout``/``max_retries`` matters: the SDK default is a
+    10-minute timeout, so a stalled provider would leave a Streamlit session
+    spinning with no feedback (docs/SECURITY_AUDIT.md DM-04).
+    """
+
+    def __init__(self, api_key: str, base_url: str, model: str,
+                 timeout: float = 60.0, max_retries: int = 2):
+        self.client = OpenAI(api_key=api_key, base_url=base_url,
+                             timeout=timeout, max_retries=max_retries)
         self.model = model
 
     # --- grounded (API + eval) ------------------------------------------------
@@ -120,7 +170,7 @@ class Generator:
             temperature=0.0,
             messages=self._messages(query, chunks),
         )
-        return resp.choices[0].message.content.strip()
+        return _content_of(resp)
 
     # --- conversation memory --------------------------------------------------
     def condense_query(self, history: List[Turn], question: str) -> str:
@@ -145,7 +195,7 @@ class Generator:
                 max_tokens=64,
                 messages=[{"role": "user", "content": prompt}],
             )
-            rewritten = (resp.choices[0].message.content or "").strip().strip('"')
+            rewritten = _content_of(resp).strip('"')
             return rewritten or question
         except Exception:  # noqa: BLE001 — never let query-rewrite break a query
             return question

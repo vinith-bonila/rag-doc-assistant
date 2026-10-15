@@ -36,6 +36,7 @@ class AskResponse(BaseModel):
 class UploadFileResult(BaseModel):
     filename: str
     chunks_added: int
+    status: Optional[str] = None   # "indexed" | "unchanged" | "no-text"
 
 
 class UploadResponse(BaseModel):

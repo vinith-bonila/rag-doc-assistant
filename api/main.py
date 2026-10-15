@@ -26,8 +26,8 @@ from slowapi.util import get_remote_address
 from sse_starlette.sse import EventSourceResponse
 
 from config import settings
-from src.ingest import SUPPORTED_EXTS
 from src.pipeline import RAGPipeline, Source
+from src.uploads import UploadRejected, safe_filename
 
 from .schemas import (
     AskRequest,
@@ -45,7 +45,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("docmind.api")
 
-MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB per file
+# One source of truth for the limit (config.MAX_UPLOAD_MB) so the API, the
+# Streamlit uploader and the docs can't drift apart (docs/SECURITY_AUDIT.md DM-08).
+MAX_UPLOAD_BYTES = settings.max_upload_bytes
+MAX_UPLOAD_FILES = 10          # per request
+READ_CHUNK = 1024 * 1024       # 1 MB
 
 pipeline: Optional[RAGPipeline] = None
 limiter = Limiter(key_func=get_remote_address)
@@ -69,11 +73,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.limiter = limiter
+# The service has no authentication, so a wildcard origin would let any page a
+# visitor has open drive it from their browser. Origins come from
+# API_CORS_ORIGINS and default to localhost (docs/SECURITY_AUDIT.md DM-10).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -113,7 +121,8 @@ def health() -> HealthResponse:
 @limiter.limit("30/minute")
 def ask(request: Request, req: AskRequest) -> AskResponse:
     pipe = _require_pipeline()
-    logger.info("ask: %r (k=%s, top_n=%s)", req.question, req.k, req.top_n)
+    # Log shape, not content: questions can quote private documents (DM-11).
+    logger.info("ask: %d chars (k=%s, top_n=%s)", len(req.question), req.k, req.top_n)
     result = pipe.answer(req.question, k=req.k, top_n=req.top_n)
     return AskResponse(
         question=result.query,
@@ -131,7 +140,7 @@ def ask_stream(request: Request, req: AskRequest) -> EventSourceResponse:
     then a `token` event per delta, then a terminal `done` event.
     """
     pipe = _require_pipeline()
-    logger.info("ask/stream: %r", req.question)
+    logger.info("ask/stream: %d chars", len(req.question))
     sources, tokens = pipe.answer_stream(req.question, k=req.k, top_n=req.top_n)
 
     def event_stream():
@@ -151,24 +160,46 @@ def ask_stream(request: Request, req: AskRequest) -> EventSourceResponse:
 @limiter.limit("10/minute")
 async def upload(request: Request, files: List[UploadFile] = File(...)) -> UploadResponse:
     pipe = _require_pipeline()
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files in one request (max {MAX_UPLOAD_FILES}).")
+
     payloads: List[tuple] = []
     for f in files:
-        ext = "." + f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
-        if ext not in SUPPORTED_EXTS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported file {f.filename!r}. Allowed: {', '.join(SUPPORTED_EXTS)}",
-            )
-        data = await f.read()
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail=f"{f.filename!r} exceeds 15 MB limit.")
-        payloads.append((f.filename, data))
+        try:
+            name = safe_filename(f.filename or "")
+        except UploadRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        # Read in bounded blocks and abort as soon as the limit is passed, so an
+        # oversized upload is never fully buffered in memory (DM-09).
+        buf = bytearray()
+        while True:
+            block = await f.read(READ_CHUNK)
+            if not block:
+                break
+            buf.extend(block)
+            if len(buf) > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"{name!r} exceeds the "
+                           f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.")
+        payloads.append((name, bytes(buf)))
 
-    logger.info("upload: %d file(s)", len(payloads))
+    logger.info("upload: %d file(s), %d bytes", len(payloads),
+                sum(len(d) for _, d in payloads))
     try:
-        summary = pipe.add_documents(payloads)
+        # Full server-side validation (type, size, magic bytes) happens inside
+        # add_documents, which every upload path shares.
+        #
+        # persist=False: this service has no authentication, so an upload must
+        # never be written into the shared on-disk index that every future
+        # visitor of the Streamlit app loads. Uploads live for this process
+        # only; build a persistent index with `python -m src.ingest` instead
+        # (docs/SECURITY_AUDIT.md DM-17).
+        summary = pipe.add_documents(payloads, persist=False)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     return UploadResponse(**summary)
 
 

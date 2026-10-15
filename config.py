@@ -55,6 +55,13 @@ class Settings:
     # Verify after generation that every [n] citation maps to a real source.
     validate_citations: bool = os.getenv("VALIDATE_CITATIONS", "true").lower() in ("1", "true", "yes")
 
+    # --- UI ---------------------------------------------------------------
+    # "dark" (default) or "light". This must match ``base`` in
+    # .streamlit/config.toml: Streamlit paints its own widget chrome from that
+    # file and cannot be re-themed at runtime, so a mismatch leaves native
+    # widgets in the other palette (docs/SECURITY_AUDIT.md UI-02).
+    ui_theme: str = os.getenv("DOCMIND_THEME", "dark").strip().lower()
+
     # --- Limits -----------------------------------------------------------
     max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "20"))
 
@@ -65,6 +72,18 @@ class Settings:
     llm_api_key: str = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
     llm_model: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    # Per-request timeout (seconds) and retry count for the chat API. The SDK
+    # default is a 10-minute timeout, which would hang a UI session on a stalled
+    # provider; keep this well under any proxy/browser idle limit.
+    llm_timeout_s: float = float(os.getenv("LLM_TIMEOUT_S", "60"))
+    llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
+
+    # --- FastAPI service (not part of the Streamlit deploy) ---------------
+    # Comma-separated allowed origins for CORS. Defaults to localhost only: the
+    # service has no authentication, so a wildcard would let any site in a
+    # visitor's browser drive it (docs/SECURITY_AUDIT.md DM-10).
+    api_cors_origins: str = os.getenv(
+        "API_CORS_ORIGINS", "http://localhost:8501,http://localhost:3000")
 
     # --- Storage ----------------------------------------------------------
     index_dir: str = os.getenv("INDEX_DIR", "storage")
@@ -72,6 +91,14 @@ class Settings:
     @property
     def has_llm(self) -> bool:
         return bool(self.llm_api_key)
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
+
+    @property
+    def cors_origins(self) -> list:
+        return [o.strip() for o in self.api_cors_origins.split(",") if o.strip()]
 
 
 settings = Settings()
