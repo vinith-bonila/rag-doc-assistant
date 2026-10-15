@@ -1,10 +1,23 @@
+# DocMind ships dark by default; the in-app sidebar toggle switches the
+# design-system tokens, and these sections keep Streamlit own chrome in step.
 [theme]
 base = "dark"
-primaryColor = "#6C8CFF"
-backgroundColor = "#0E1117"
-secondaryBackgroundColor = "#1A1D27"
-textColor = "#E6E8EF"
+primaryColor = "#8B85FF"
 font = "sans serif"
 
+[theme.dark]
+backgroundColor = "#0B0F19"
+secondaryBackgroundColor = "#121826"
+textColor = "#E8ECF5"
+primaryColor = "#8B85FF"
+
+[theme.light]
+backgroundColor = "#F8FAFC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#172033"
+primaryColor = "#635BFF"
+
 [server]
+# Hard cap at the Streamlit layer. The authoritative check is server-side in
+# src/uploads.py (MAX_UPLOAD_MB), which every upload path shares.
 maxUploadSize = 20
