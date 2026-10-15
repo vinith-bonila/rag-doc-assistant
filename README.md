@@ -22,7 +22,7 @@ Community Cloud.
 ## Metrics (real, on the bundled eval set)
 
 Measured by the built-in harness over 12 labelled questions — reproduce with
-`python -m eval.evaluate` or the **Evaluation** tab in the app.
+`python -m eval.evaluate` or **Technical details → Run evaluation** in the app.
 
 | Metric | Score | What it measures |
 |---|---|---|
@@ -30,6 +30,34 @@ Measured by the built-in harness over 12 labelled questions — reproduce with
 | **MRR** | **0.96** | How near the top the first correct passage lands after reranking (ordering) |
 | **faithfulness** | **0.78** | Fraction of answer claims supported by context, via LLM-as-judge (anti-hallucination) |
 | **answer relevance** | **0.82** | Answer is semantically on-topic for the question |
+
+## The interface
+
+DocMind is built so an ordinary user never has to meet the machinery. The
+default path is four steps — **upload → ask → read → check the source** — and
+everything an engineer wants sits one expander away.
+
+- **Ask** — the question box, the answer, and under it: the citation-check
+  status, the exact source passages, how the answer was found, and the
+  per-query trace.
+- **Documents** — what DocMind can search, with type, passage and page counts,
+  a passage inspector, and the scope filter.
+- **Technical details** — retrieval configuration, an explicit statement of
+  what is and isn't verified, and the evaluation harness.
+- **Settings** — configuration and data-handling, read-only.
+
+A six-step flow chart on the first-run screen explains what the app does with a
+file before anyone uploads one. The palette is dark by default
+(`DOCMIND_THEME=dark`); a light palette ships alongside it.
+
+### Honest status labels
+
+The UI never claims more verification than the code performs. A passing check
+says **"Citation checks passed"** — meaning every `[n]` marker resolves to a
+passage that was actually retrieved. It does **not** mean the passage supports
+the claim; nothing in the app says "verified" or "hallucination-free". When
+markers are out of range the badge reads "Some citations need review"; when
+there is no supporting evidence it says so.
 
 ## Features
 
@@ -52,7 +80,12 @@ Measured by the built-in harness over 12 labelled questions — reproduce with
 - 🔗 **Clickable citations** — every answer's sources appear in a panel; click one
   to read the exact retrieved passage (with PDF page number).
 - 📊 **Evaluation dashboard** — recall@k, MRR, faithfulness, answer relevance as
-  metric cards + a chart, each explained in one line, re-runnable in the UI.
+  metric cards, each explained in one line, re-runnable from **Technical
+  details**.
+- 🔒 **Session-isolated uploads** — your documents are scoped to your browser
+  session and held in memory, so they neither reach another visitor nor outlive
+  the process (isolation, not authentication — see
+  [`docs/SECURITY.md`](docs/SECURITY.md)).
 - 🧰 **Production touches** — Pydantic validation, structured logging, rate
   limiting (on the API), a typed & lazy-loaded pipeline, pytest, Docker, and CI.
 
@@ -206,9 +239,13 @@ API endpoint reference in [`docs/API.md`](docs/API.md).
 pytest
 ```
 
-Covers chunking + page-metadata propagation, BM25 lexical matching, RRF fusion
-math, hybrid-retrieval recall, and citation correctness. CI
-(`.github/workflows/ci.yml`) runs ruff + pytest on every push.
+**90 tests.** Covers chunking + page-metadata propagation, BM25 lexical
+matching, RRF fusion math, hybrid-retrieval recall, citation correctness,
+table-aware parsing, a deterministic retrieval quality gate, and — in
+`tests/test_security.py` and `tests/test_ui_theme.py` — session isolation,
+upload validation, prompt-injection fence escaping, API hardening, HTML
+escaping and colour contrast. CI (`.github/workflows/ci.yml`) runs ruff +
+pytest on every push.
 
 ## Project structure
 
@@ -223,13 +260,21 @@ src/
   llm.py             grounded generation + streaming, with citations
   pipeline.py        retrieve → rerank → generate; lazy models; live upload indexing
   ingest.py          parse (pdf/docx/txt/md) → chunk → embed → FAISS
+  uploads.py         server-side upload validation (type · size · magic bytes)
+  metadata.py        chunk metadata schema + MetaFilter (owner/source/type/page)
+  context.py         dedup + token-budget context construction
+  validation.py      post-generation citation checking
+  trace.py           per-query RAGTrace (timings + counts, no secrets)
 api/
   main.py            FastAPI: /health /ask /ask/stream /upload /eval
   schemas.py         Pydantic request/response models
-ui/streamlit_app.py  the deployed app — upload · streaming chat · citations · eval
+ui/
+  streamlit_app.py   the deployed app — Ask · Documents · Technical · Settings
+  theme.py           design system: palettes, components, flow chart (dark/light)
 eval/                recall@k · MRR · faithfulness · answer relevance
-tests/               pytest: chunking, retrieval, citations
-docs/                ARCHITECTURE.md · DEPLOY.md · API.md
+tests/               pytest: chunking, retrieval, citations, security, UI/theme
+docs/                SECURITY.md · SECURITY_AUDIT.md · PRODUCTION_RAG_AUDIT.md
+                     ARCHITECTURE.md · DEPLOY.md · API.md · EVALUATION.md
 Dockerfile · run.sh  containerized Streamlit app
 ```
 
@@ -247,6 +292,26 @@ All settings live in `config.py`, overridable via environment / Streamlit secret
 | `RERANK_TOP_N` | `5` | passages kept after reranking |
 | `CHUNK_STRATEGY` | `recursive` | `recursive` or `semantic` |
 | `LLM_MODEL` | `gpt-4o-mini` | any OpenAI-compatible model |
+| `LLM_TIMEOUT_S` | `60` | per-request timeout (the SDK default is 600s) |
+| `LLM_MAX_RETRIES` | `2` | retries on a failed chat request |
+| `MAX_UPLOAD_MB` | `20` | **enforced server-side** for every upload path |
+| `DOCMIND_THEME` | `dark` | `dark` or `light` — must match `base` in `.streamlit/config.toml` |
+| `API_CORS_ORIGINS` | localhost | allow-list for the FastAPI service (never `*`) |
+
+### Upload limits
+
+Uploads are validated server-side in `src/uploads.py`, which every entry path
+shares: **PDF, DOCX, TXT, MD**, up to **`MAX_UPLOAD_MB`** (20 MB) per file,
+checked by extension *and* magic bytes, with directory components stripped from
+the filename. The file picker's own type filter is a convenience, not the
+boundary.
+
+### Switching the palette
+
+`DOCMIND_THEME` and `.streamlit/config.toml`'s `[theme] base` must agree —
+Streamlit paints its own widgets from that file and cannot be re-themed at
+runtime. A test (`test_app_theme_matches_streamlit_config_base`) fails if they
+drift apart.
 
 ## Production hardening
 
@@ -261,19 +326,41 @@ reference ([`docs/PRODUCTION_RAG_AUDIT.md`](docs/PRODUCTION_RAG_AUDIT.md)):
   re-uploads.
 - **Context construction** — near-duplicate dedup + a token budget before the LLM,
   so citations align 1:1 with what the model saw.
-- **Live validation + injection defense** — every `[n]` citation is verified
-  against real sources; retrieved passages are delimited and treated as untrusted
-  data the model must not obey ([`docs/SECURITY.md`](docs/SECURITY.md)).
+- **Live validation + injection defense** — every `[n]` citation is checked
+  against the real retrieved sources, and out-of-range markers are rewritten to
+  `[?]`; retrieved passages are fenced, **escaped against that fence**, and
+  treated as untrusted data the model must not obey.
+- **Session isolation** — every chunk carries an `owner`; retrieval always
+  filters to `{this session, public}`, enforced *inside* each retriever so rank
+  fusion and reranking cannot reintroduce another visitor's document. Uploads
+  are held in memory and never written to the shared on-disk index. This is
+  isolation, **not authentication** — see below.
 - **Observability** — a per-query `RAGTrace` (per-stage timings + counts) shown in
   the UI and logged as one structured line.
 - **Expanded evaluation** — Precision@K, NDCG@K, citation validity and
   zero-result rate, with a deterministic **CI quality gate**
   ([`docs/EVALUATION.md`](docs/EVALUATION.md)).
 
+## Security
+
+DocMind is a **public single-user demo**: one shared process, no user accounts.
+Session isolation keeps one visitor's uploads out of another's answers, but
+there is no verified identity behind it, no audit trail and no encryption at
+rest.
+
+> **Do not upload confidential material to a public deployment.**
+
+- [`docs/SECURITY.md`](docs/SECURITY.md) — what is enforced in code, what is
+  out of scope, and what multi-user use would require.
+- [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) — risk-ranked findings
+  with evidence, fixes and the regression test covering each.
+
 ## Future improvements
 
-- Multi-user auth + tenant isolation + ACL-filtered retrieval (the `MetaFilter`
-  interface is ready for an `access`/`owner` field).
+- Multi-user auth + tenant isolation + ACL-filtered retrieval. `MetaFilter`
+  already enforces an `owners` scope inside retrieval; what is missing is a
+  verified identity to populate it with instead of a session id, plus per-owner
+  persistent storage. See [`docs/SECURITY.md`](docs/SECURITY.md).
 - OCR for scanned/image-only pages (currently detected and flagged).
 - Approximate (HNSW/IVF) index + response/embedding caching at scale.
 - Agentic retrieval / query decomposition for multi-hop questions.
